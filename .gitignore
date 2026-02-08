@@ -1,0 +1,27 @@
+# Build
+build/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+Makefile
+cmake_install.cmake
+*.o
+*.a
+*.so
+*.dylib
+
+# Generated
+config.h
+indi_rpicamera.xml
+indi_rpicamera
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
