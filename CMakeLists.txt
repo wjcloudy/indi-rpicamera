@@ -6,11 +6,13 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 include(GNUInstallDirs)
 
+list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake_modules")
+
 set(RPICAMERA_VERSION_MAJOR 1)
 set(RPICAMERA_VERSION_MINOR 0)
 
 # ---- Find dependencies ----
-find_package(INDI REQUIRED)
+find_package(INDI REQUIRED COMPONENTS driver)
 find_package(CFITSIO REQUIRED)
 find_package(ZLIB REQUIRED)
 find_package(Threads REQUIRED)

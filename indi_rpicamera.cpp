@@ -16,6 +16,8 @@
 #include <cstring>
 #include <algorithm>
 #include <cmath>
+#include <chrono>
+#include <ctime>
 #include <sstream>
 
 // Convenience aliases
@@ -82,6 +84,54 @@ bool RPiCamera::initProperties()
     // --- Capture format selector (framework creates the switch) ---
     addCaptureFormat({"INDI_RAW", "RAW", 16, true});
     addCaptureFormat({"INDI_RGB", "RGB", 8, false});
+    addCaptureFormat({"INDI_RAW_MONO", "RAW Mono", 16, false});
+    addCaptureFormat({"INDI_MONO", "Mono", 8, false});
+
+    // --- Raw Left-Shift (normalize to 16-bit) ---
+    RawLeftShiftSP[0].fill("LEFTSHIFT_ON",  "On",  ISS_ON);
+    RawLeftShiftSP[1].fill("LEFTSHIFT_OFF", "Off", ISS_OFF);
+    RawLeftShiftSP.fill(getDeviceName(), "RAW_LEFT_SHIFT", "Raw Normalize",
+                        IMAGE_SETTINGS_TAB, IP_RW, ISR_1OFMANY, 60, IPS_IDLE);
+
+    // --- Fast Exposure toggle ---
+    FastExposureSP[0].fill("FAST_ON",  "On",  ISS_OFF);
+    FastExposureSP[1].fill("FAST_OFF", "Off", ISS_ON);
+    FastExposureSP.fill(getDeviceName(), "CCD_FAST_TOGGLE", "Fast Exposure",
+                        MAIN_CONTROL_TAB, IP_RW, ISR_1OFMANY, 60, IPS_IDLE);
+
+    FastCountNP[0].fill("FAST_COUNT", "Frame Count (0=unlimited)", "%.0f",
+                        0, 100000, 1, 0);
+    FastCountNP.fill(getDeviceName(), "CCD_FAST_COUNT", "Fast Count",
+                     MAIN_CONTROL_TAB, IP_RW, 60, IPS_IDLE);
+
+    // --- CCD_PROCFRAME (ISP output size for RGB/Mono) ---
+    ProcFrameNP[0].fill("PROC_WIDTH",  "Width",  "%.0f", 64, 16384, 1, 0);
+    ProcFrameNP[1].fill("PROC_HEIGHT", "Height", "%.0f", 64, 16384, 1, 0);
+    ProcFrameNP.fill(getDeviceName(), "CCD_PROCFRAME", "ISP Output Size",
+                     IMAGE_SETTINGS_TAB, IP_RW, 60, IPS_IDLE);
+
+    // --- Streaming Resolution Preset ---
+    StreamResSP[STREAM_720P  ].fill("STREAM_720P",   "720p",   ISS_ON);
+    StreamResSP[STREAM_1080P ].fill("STREAM_1080P",  "1080p",  ISS_OFF);
+    StreamResSP[STREAM_4K    ].fill("STREAM_4K",     "4K",     ISS_OFF);
+    StreamResSP[STREAM_CUSTOM].fill("STREAM_CUSTOM", "Custom", ISS_OFF);
+    StreamResSP.fill(getDeviceName(), "STREAM_RESOLUTION", "Stream Resolution",
+                     "Streaming", IP_RW, ISR_1OFMANY, 60, IPS_IDLE);
+
+    StreamCustomResNP[0].fill("STREAM_WIDTH",  "Width",  "%.0f", 160, 8192, 1, 1280);
+    StreamCustomResNP[1].fill("STREAM_HEIGHT", "Height", "%.0f", 120, 8192, 1, 720);
+    StreamCustomResNP.fill(getDeviceName(), "STREAM_CUSTOM_RES", "Custom Resolution",
+                           "Streaming", IP_RW, 60, IPS_IDLE);
+
+    // --- Streaming Target FPS ---
+    StreamFpsNP[0].fill("TARGET_FPS", "Target FPS", "%.1f", 1.0, 120.0, 1.0, 30.0);
+    StreamFpsNP.fill(getDeviceName(), "STREAM_FPS", "Target FPS",
+                     "Streaming", IP_RW, 60, IPS_IDLE);
+
+    // --- Streaming Estimated FPS (read-only) ---
+    StreamEstFpsNP[0].fill("EST_FPS", "Est. FPS", "%.1f", 0, 999, 0, 0);
+    StreamEstFpsNP.fill(getDeviceName(), "STREAM_EST_FPS", "Actual FPS",
+                        "Streaming", IP_RO, 60, IPS_IDLE);
 
     // --- Gain ---
     GainNP[0].fill("GAIN", "Gain", "%.1f", 1.0, 16.0, 0.1, 1.0);
@@ -112,11 +162,29 @@ bool RPiCamera::updateProperties()
     if (isConnected())
     {
         defineProperty(GainNP);
+        defineProperty(RawLeftShiftSP);
+        defineProperty(FastExposureSP);
+        defineProperty(FastCountNP);
+        defineProperty(ProcFrameNP);
+        defineProperty(StreamResSP);
+        defineProperty(StreamCustomResNP);
+        defineProperty(StreamFpsNP);
+        defineProperty(StreamEstFpsNP);
 
         // Camera-control properties were created in Connect() →
         // createCameraControlProperties().  Define them now.
         if (m_HasAE)
+        {
             defineProperty(AutoExposureSP);
+            if (m_HasAeConstraintMode)
+                defineProperty(AeConstraintModeSP);
+            if (m_HasAeExposureMode)
+                defineProperty(AeExposureModeSP);
+            if (m_HasAeMeteringMode)
+                defineProperty(AeMeteringModeSP);
+        }
+        if (m_HasExposureValue)
+            defineProperty(ExposureValueNP);
         if (m_HasAWB)
         {
             defineProperty(AutoWhiteBalanceSP);
@@ -136,16 +204,47 @@ bool RPiCamera::updateProperties()
         {
             defineProperty(AfModeSP);
             defineProperty(AfTriggerSP);
+            if (m_HasAfMetering)
+                defineProperty(AfMeteringSP);
+            if (m_HasAfPause)
+                defineProperty(AfPauseSP);
+            if (m_HasAfRange)
+                defineProperty(AfRangeSP);
+            if (m_HasAfSpeed)
+                defineProperty(AfSpeedSP);
         }
+
+        if (m_HasLensPosition)
+            defineProperty(LensPositionNP);
+
+        defineProperty(TemperatureNP);
 
         SetTimer(getCurrentPollingPeriod());
     }
     else
     {
         deleteProperty(GainNP);
+        deleteProperty(RawLeftShiftSP);
+        deleteProperty(FastExposureSP);
+        deleteProperty(FastCountNP);
+        deleteProperty(ProcFrameNP);
+        deleteProperty(StreamResSP);
+        deleteProperty(StreamCustomResNP);
+        deleteProperty(StreamFpsNP);
+        deleteProperty(StreamEstFpsNP);
 
         if (m_HasAE)
+        {
             deleteProperty(AutoExposureSP);
+            if (m_HasAeConstraintMode)
+                deleteProperty(AeConstraintModeSP);
+            if (m_HasAeExposureMode)
+                deleteProperty(AeExposureModeSP);
+            if (m_HasAeMeteringMode)
+                deleteProperty(AeMeteringModeSP);
+        }
+        if (m_HasExposureValue)
+            deleteProperty(ExposureValueNP);
         if (m_HasAWB)
         {
             deleteProperty(AutoWhiteBalanceSP);
@@ -165,7 +264,20 @@ bool RPiCamera::updateProperties()
         {
             deleteProperty(AfModeSP);
             deleteProperty(AfTriggerSP);
+            if (m_HasAfMetering)
+                deleteProperty(AfMeteringSP);
+            if (m_HasAfPause)
+                deleteProperty(AfPauseSP);
+            if (m_HasAfRange)
+                deleteProperty(AfRangeSP);
+            if (m_HasAfSpeed)
+                deleteProperty(AfSpeedSP);
         }
+
+        if (m_HasLensPosition)
+            deleteProperty(LensPositionNP);
+
+        deleteProperty(TemperatureNP);
     }
 
     return true;
@@ -229,14 +341,21 @@ bool RPiCamera::Connect()
         std::string bayer = bayerPatternFromFormat(mode.format);
         if (!bayer.empty())
         {
-            IUSaveText(&BayerT[0], "0");              // X offset
-            IUSaveText(&BayerT[1], "0");              // Y offset
-            IUSaveText(&BayerT[2], bayer.c_str());    // e.g. "RGGB"
+            BayerTP[0].setText("0");              // X offset
+            BayerTP[1].setText("0");              // Y offset
+            BayerTP[2].setText(bayer.c_str());    // e.g. "RGGB"
         }
     }
 
     // ---- Create camera-control properties based on what the sensor supports ----
     createCameraControlProperties();
+
+    // ---- Set default ProcFrame to sensor resolution ----
+    if (!m_SensorModes.empty())
+    {
+        ProcFrameNP[0].setValue(m_SensorModes[0].size.width);
+        ProcFrameNP[1].setValue(m_SensorModes[0].size.height);
+    }
 
     // ---- Allocate the default frame buffer ----
     PrimaryCCD.setFrameBufferSize(PrimaryCCD.getXRes() *
@@ -291,6 +410,17 @@ void RPiCamera::enumerateSensorModes()
 
     for (const auto &pixFmt : formats.pixelformats())
     {
+        std::string fmtName = pixFmt.toString();
+
+        // Skip Pi 5 PISP compressed transport formats — we cannot
+        // decompress these.  The unpacked variant should also be listed.
+        if (fmtName.find("PISP") != std::string::npos ||
+            fmtName.find("_COMP") != std::string::npos)
+        {
+            LOGF_DEBUG("Skipping unsupported format: %s", fmtName.c_str());
+            continue;
+        }
+
         for (const auto &sz : formats.sizes(pixFmt))
         {
             if (m_NumSensorModes >= MAX_SENSOR_MODES)
@@ -342,10 +472,35 @@ void RPiCamera::enumerateSensorModes()
         RawFormatSP.fill(getDeviceName(), "RAW_FORMAT", "Raw Mode",
                          IMAGE_SETTINGS_TAB, IP_RW, ISR_1OFMANY,
                          60, IPS_IDLE);
-        RawFormatSP.shrink(m_NumSensorModes);
+        RawFormatSP.resize(m_NumSensorModes);
     }
 
     LOGF_INFO("Enumerated %d raw sensor mode(s).", m_NumSensorModes);
+
+    // ---- Pi 5 PiSP detection ----
+    // On Pi 5 (PiSP backend), the Raw stream delivers PISP-compressed data
+    // which we cannot use.  Detect this by validating the first raw mode and
+    // checking if the format gets adjusted to a PISP/COMP format.
+    if (m_NumSensorModes > 0)
+    {
+        auto testCfg = m_Camera->generateConfiguration({lc::StreamRole::Raw});
+        if (testCfg && !testCfg->empty())
+        {
+            testCfg->at(0).pixelFormat = m_SensorModes[0].format;
+            testCfg->at(0).size        = m_SensorModes[0].size;
+            testCfg->validate();
+            std::string valFmt = testCfg->at(0).pixelFormat.toString();
+            if (valFmt.find("PISP") != std::string::npos ||
+                valFmt.find("_COMP") != std::string::npos)
+            {
+                m_IsPiSP = true;
+                // Record the native sensor bit depth before we overwrite modes
+                m_NativeBitDepth = m_SensorModes[0].bitDepth;
+                LOG_INFO("Pi 5 PiSP backend detected — raw Bayer will be "
+                         "routed through the ISP (StillCapture + Bayer16).");
+            }
+        }
+    }
 }
 
 // ============================================================
@@ -469,6 +624,126 @@ void RPiCamera::createCameraControlProperties()
         AfTriggerSP.fill(getDeviceName(), "AF_TRIGGER", "AF Trigger",
                          "Camera Controls", IP_RW, ISR_ATMOST1, 60, IPS_IDLE);
     }
+
+    // --- Lens Position (manual focus — optional) ---
+    m_HasLensPosition = ctrlMap.find(&lc::controls::LensPosition) != ctrlMap.end();
+    if (m_HasLensPosition)
+    {
+        auto it = ctrlMap.find(&lc::controls::LensPosition);
+        float minL = it->second.min().get<float>();
+        float maxL = it->second.max().get<float>();
+        float defL = it->second.def().get<float>();
+        LensPositionNP[0].fill("LENS_POSITION", "Position (dioptres)", "%.2f",
+                               minL, maxL, 0.01, defL);
+        LensPositionNP.fill(getDeviceName(), "FOCUS_POSITION", "Focus",
+                            "Camera Controls", IP_RW, 60, IPS_IDLE);
+        LOGF_INFO("Lens focus available: %.2f to %.2f dioptres (0 = infinity)",
+                  minL, maxL);
+    }
+
+    // --- AE Constraint Mode (optional) ---
+    m_HasAeConstraintMode = ctrlMap.find(&lc::controls::AeConstraintMode) != ctrlMap.end();
+    if (m_HasAeConstraintMode)
+    {
+        AeConstraintModeSP[AE_CONSTRAINT_NORMAL   ].fill("AEC_NORMAL",    "Normal",    ISS_ON);
+        AeConstraintModeSP[AE_CONSTRAINT_HIGHLIGHT].fill("AEC_HIGHLIGHT", "Highlight", ISS_OFF);
+        AeConstraintModeSP[AE_CONSTRAINT_SHADOWS  ].fill("AEC_SHADOWS",   "Shadows",   ISS_OFF);
+        AeConstraintModeSP[AE_CONSTRAINT_CUSTOM   ].fill("AEC_CUSTOM",    "Custom",    ISS_OFF);
+        AeConstraintModeSP.fill(getDeviceName(), "AE_CONSTRAINT_MODE", "AE Constraint",
+                                "Camera Controls", IP_RW, ISR_1OFMANY, 60, IPS_IDLE);
+    }
+
+    // --- AE Exposure Mode (optional) ---
+    m_HasAeExposureMode = ctrlMap.find(&lc::controls::AeExposureMode) != ctrlMap.end();
+    if (m_HasAeExposureMode)
+    {
+        AeExposureModeSP[AE_EXPOSURE_NORMAL].fill("AEE_NORMAL", "Normal", ISS_ON);
+        AeExposureModeSP[AE_EXPOSURE_SHORT ].fill("AEE_SHORT",  "Short",  ISS_OFF);
+        AeExposureModeSP[AE_EXPOSURE_LONG  ].fill("AEE_LONG",   "Long",   ISS_OFF);
+        AeExposureModeSP[AE_EXPOSURE_CUSTOM].fill("AEE_CUSTOM", "Custom", ISS_OFF);
+        AeExposureModeSP.fill(getDeviceName(), "AE_EXPOSURE_MODE", "AE Exposure Mode",
+                              "Camera Controls", IP_RW, ISR_1OFMANY, 60, IPS_IDLE);
+    }
+
+    // --- AE Metering Mode (optional) ---
+    m_HasAeMeteringMode = ctrlMap.find(&lc::controls::AeMeteringMode) != ctrlMap.end();
+    if (m_HasAeMeteringMode)
+    {
+        AeMeteringModeSP[AE_METERING_CENTRE].fill("AEM_CENTRE", "Centre Weighted", ISS_ON);
+        AeMeteringModeSP[AE_METERING_SPOT  ].fill("AEM_SPOT",   "Spot",            ISS_OFF);
+        AeMeteringModeSP[AE_METERING_MATRIX].fill("AEM_MATRIX", "Matrix",          ISS_OFF);
+        AeMeteringModeSP[AE_METERING_CUSTOM].fill("AEM_CUSTOM", "Custom",          ISS_OFF);
+        AeMeteringModeSP.fill(getDeviceName(), "AE_METERING_MODE", "AE Metering",
+                              "Camera Controls", IP_RW, ISR_1OFMANY, 60, IPS_IDLE);
+    }
+
+    // --- Exposure Value (EV compensation, optional) ---
+    m_HasExposureValue = ctrlMap.find(&lc::controls::ExposureValue) != ctrlMap.end();
+    if (m_HasExposureValue)
+    {
+        ExposureValueNP[0].fill("EV", "EV", "%.1f", -8.0, 8.0, 0.5, 0.0);
+        ExposureValueNP.fill(getDeviceName(), "EXPOSURE_VALUE", "Exposure Value",
+                             "Camera Controls", IP_RW, 60, IPS_IDLE);
+    }
+
+    // --- Extended AF controls (optional) ---
+    if (m_HasAF)
+    {
+        m_HasAfMetering = ctrlMap.find(&lc::controls::AfMetering) != ctrlMap.end();
+        if (m_HasAfMetering)
+        {
+            AfMeteringSP[AF_METERING_AUTO   ].fill("AFM_AUTO",    "Auto",    ISS_ON);
+            AfMeteringSP[AF_METERING_WINDOWS].fill("AFM_WINDOWS", "Windows", ISS_OFF);
+            AfMeteringSP.fill(getDeviceName(), "AF_METERING", "AF Metering",
+                              "Camera Controls", IP_RW, ISR_1OFMANY, 60, IPS_IDLE);
+        }
+
+        m_HasAfPause = ctrlMap.find(&lc::controls::AfPause) != ctrlMap.end();
+        if (m_HasAfPause)
+        {
+            AfPauseSP[AF_PAUSE_DEFERRED ].fill("AFP_DEFERRED",  "Deferred",  ISS_OFF);
+            AfPauseSP[AF_PAUSE_IMMEDIATE].fill("AFP_IMMEDIATE", "Immediate", ISS_OFF);
+            AfPauseSP[AF_PAUSE_RESUME   ].fill("AFP_RESUME",    "Resume",    ISS_OFF);
+            AfPauseSP.fill(getDeviceName(), "AF_PAUSE", "AF Pause",
+                           "Camera Controls", IP_RW, ISR_ATMOST1, 60, IPS_IDLE);
+        }
+
+        m_HasAfRange = ctrlMap.find(&lc::controls::AfRange) != ctrlMap.end();
+        if (m_HasAfRange)
+        {
+            AfRangeSP[AF_RANGE_NORMAL].fill("AFR_NORMAL", "Normal", ISS_ON);
+            AfRangeSP[AF_RANGE_MACRO ].fill("AFR_MACRO",  "Macro",  ISS_OFF);
+            AfRangeSP[AF_RANGE_FULL  ].fill("AFR_FULL",   "Full",   ISS_OFF);
+            AfRangeSP.fill(getDeviceName(), "AF_RANGE", "AF Range",
+                           "Camera Controls", IP_RW, ISR_1OFMANY, 60, IPS_IDLE);
+        }
+
+        m_HasAfSpeed = ctrlMap.find(&lc::controls::AfSpeed) != ctrlMap.end();
+        if (m_HasAfSpeed)
+        {
+            AfSpeedSP[AF_SPEED_NORMAL].fill("AFS_NORMAL", "Normal", ISS_ON);
+            AfSpeedSP[AF_SPEED_FAST  ].fill("AFS_FAST",   "Fast",   ISS_OFF);
+            AfSpeedSP.fill(getDeviceName(), "AF_SPEED", "AF Speed",
+                           "Camera Controls", IP_RW, ISR_1OFMANY, 60, IPS_IDLE);
+        }
+    }
+
+    // --- Sensor Temperature (read-only) ---
+    TemperatureNP[0].fill("CCD_TEMPERATURE_VALUE", "Temperature (\u00b0C)", "%.1f",
+                          -40.0, 85.0, 0, 0);
+    TemperatureNP.fill(getDeviceName(), "CCD_TEMPERATURE", "Temperature",
+                       MAIN_CONTROL_TAB, IP_RO, 60, IPS_IDLE);
+
+    // --- Exposure Time limits from hardware ---
+    {
+        auto it = ctrlMap.find(&lc::controls::ExposureTime);
+        if (it != ctrlMap.end())
+        {
+            m_ExposureMinS = it->second.min().get<int32_t>() / 1e6f;
+            m_ExposureMaxS = it->second.max().get<int32_t>() / 1e6f;
+            LOGF_INFO("Exposure range: %.6f s to %.1f s", m_ExposureMinS, m_ExposureMaxS);
+        }
+    }
 }
 
 // ============================================================
@@ -490,8 +765,29 @@ bool RPiCamera::StartExposure(float duration)
     PrimaryCCD.setExposureDuration(duration);
 
     // ---- Determine capture format ----
-    std::string capFmt = GetCaptureFormat();
-    m_ActiveIsRaw = (capFmt == "INDI_RAW");
+    std::string capFmt = "INDI_RAW";
+    for (size_t i = 0; i < m_CaptureFormats.size(); i++)
+    {
+        if (CaptureFormatSP[i].getState() == ISS_ON)
+        {
+            capFmt = m_CaptureFormats[i].name;
+            break;
+        }
+    }
+    m_ActiveCaptureFmt = capFmt;
+    m_ActiveIsRaw = (capFmt == "INDI_RAW" || capFmt == "INDI_RAW_MONO");
+
+    // Fast exposure mode check
+    m_FastMode = (FastExposureSP.findOnSwitchIndex() == 0);
+    if (m_FastMode)
+    {
+        int count = static_cast<int>(FastCountNP[0].getValue());
+        m_FastFramesRemaining = (count <= 0) ? -1 : count; // -1 = unlimited
+    }
+    else
+    {
+        m_FastFramesRemaining = 0;
+    }
 
     // Stop any previous camera session
     if (m_CameraRunning)
@@ -502,7 +798,7 @@ bool RPiCamera::StartExposure(float duration)
     m_Config.reset();
 
     // ---- Configure and start ----
-    bool ok = m_ActiveIsRaw ? configureForStill() : configureForStill();
+    bool ok = configureForStill();
     if (!ok)
     {
         LOG_ERROR("Failed to configure camera for exposure.");
@@ -518,11 +814,56 @@ bool RPiCamera::StartExposure(float duration)
     // ---- Set controls on the first queued request ----
     {
         auto &req = m_Requests[0];
-        int64_t expUs = static_cast<int64_t>(duration * 1e6);
+
+        // Handle BIAS frame type — force minimum exposure
+        float effectiveDuration = duration;
+        auto frameType = PrimaryCCD.getFrameType();
+        if (frameType == INDI::CCDChip::BIAS_FRAME)
+        {
+            effectiveDuration = m_ExposureMinS;
+            LOGF_INFO("BIAS frame: overriding exposure to %.6f s", effectiveDuration);
+        }
+
+        int64_t expUs = static_cast<int64_t>(effectiveDuration * 1e6);
+        if (expUs < 1) expUs = 1;
+
         req->controls().set(lc::controls::ExposureTime, static_cast<int32_t>(expUs));
         req->controls().set(lc::controls::AnalogueGain,
                             static_cast<float>(GainNP[0].getValue()));
+
+        // Set FrameDurationLimits to allow the full requested exposure.
+        // Without this, the sensor's default frame rate may clip long exposures.
+        {
+            int64_t frameDurMin = expUs;
+            int64_t frameDurMax = expUs + 1000 > 100000 ? expUs + 1000 : 100000;
+            req->controls().set(lc::controls::FrameDurationLimits,
+                                libcamera::Span<const int64_t, 2>({frameDurMin, frameDurMax}));
+        }
+
+        // Apply user camera controls (AWB, ISP tuning, NR, AF, etc.)
         applyCameraControls(req->controls());
+
+        // Force AE OFF for still captures — manual ExposureTime must not be
+        // overridden by the auto-exposure algorithm.  The AE preference only
+        // affects streaming/preview.
+        if (m_HasAE)
+            req->controls().set(lc::controls::AeEnable, false);
+    }
+
+    // Record wall-clock time for DATE-OBS FITS keyword
+    {
+        auto now = std::chrono::system_clock::now();
+        auto tt  = std::chrono::system_clock::to_time_t(now);
+        auto ms  = std::chrono::duration_cast<std::chrono::milliseconds>(
+                       now.time_since_epoch()) % 1000;
+        struct tm utc;
+        gmtime_r(&tt, &utc);
+        char buf[64];
+        snprintf(buf, sizeof(buf), "%04d-%02d-%02dT%02d:%02d:%02d.%03ld",
+                 utc.tm_year + 1900, utc.tm_mon + 1, utc.tm_mday,
+                 utc.tm_hour, utc.tm_min, utc.tm_sec,
+                 static_cast<long>(ms.count()));
+        m_ExposureDateObs = buf;
     }
 
     // Queue just one request for a single-frame capture
@@ -546,6 +887,8 @@ bool RPiCamera::AbortExposure()
     if (!m_InExposure)
         return true;
 
+    m_FastFramesRemaining = 0;
+    m_FastMode = false;
     stopCamera();
     m_InExposure = false;
     m_FrameReady = false;
@@ -617,11 +960,29 @@ int RPiCamera::downloadImage()
 
     const uint8_t *srcData = static_cast<const uint8_t *>(it->second[0].memory);
     size_t srcLen = it->second[0].length;
+    (void)srcLen; // used only in debug logging
 
     int subX = PrimaryCCD.getSubX();
     int subY = PrimaryCCD.getSubY();
     int subW = PrimaryCCD.getSubW();
     int subH = PrimaryCCD.getSubH();
+
+    // Garbage column removal: reduce effective width
+    int garbageCols = garbageColumnsForCurrentMode();
+    if (garbageCols > 0 && m_ActiveIsRaw)
+    {
+        int maxW = static_cast<int>(m_ActiveSize.width) - garbageCols;
+        if (subX + subW > maxW)
+        {
+            subW = maxW - subX;
+            if (subW < 1) subW = 1;
+            LOGF_DEBUG("Garbage column removal: cropping to width=%d (removed %d cols)",
+                       subW, garbageCols);
+        }
+    }
+
+    bool isRawMono = (m_ActiveCaptureFmt == "INDI_RAW_MONO");
+    bool isMono    = (m_ActiveCaptureFmt == "INDI_MONO");
 
     if (m_ActiveIsRaw)
     {
@@ -637,75 +998,261 @@ int RPiCamera::downloadImage()
             PrimaryCCD.getFrameBuffer());
 
         int fullW = static_cast<int>(m_ActiveSize.width);
+        unsigned int stride = m_Config->at(0).stride;
+
+        LOGF_DEBUG("downloadImage RAW: %dx%d  stride=%u  fmt=%s",
+                   fullW, m_ActiveSize.height, stride,
+                   m_ActivePixelFormat.toString().c_str());
 
         if (isPackedCSI2(m_ActivePixelFormat))
         {
-            // Unpack the full raw frame, then extract the subframe.
+            // CSI-2 packed: unpack row by row using stride for row offsets
             unsigned int bd = bitDepthFromFormat(m_ActivePixelFormat);
-            size_t totalPixels = static_cast<size_t>(m_ActiveSize.width) *
-                                 m_ActiveSize.height;
+            size_t rowPixels = static_cast<size_t>(fullW);
+            std::vector<uint16_t> unpackedRow(rowPixels);
 
-            std::vector<uint16_t> unpacked(totalPixels);
-            if (bd == 10)
-                unpack10bitCSI2(srcData, unpacked.data(), totalPixels);
-            else if (bd == 12)
-                unpack12bitCSI2(srcData, unpacked.data(), totalPixels);
-            else
-                std::memcpy(unpacked.data(), srcData,
-                            std::min(totalPixels * 2, srcLen));
-
-            // Copy subframe from the unpacked full frame
             for (int row = 0; row < subH; row++)
             {
-                const uint16_t *srcRow =
-                    unpacked.data() + (subY + row) * fullW + subX;
+                const uint8_t *srcRow = srcData + (subY + row) * stride;
+                if (bd == 10)
+                    unpack10bitCSI2(srcRow, unpackedRow.data(), rowPixels);
+                else if (bd == 12)
+                    unpack12bitCSI2(srcRow, unpackedRow.data(), rowPixels);
+                else
+                    std::memcpy(unpackedRow.data(), srcRow,
+                                std::min(rowPixels * 2, static_cast<size_t>(stride)));
+
                 uint16_t *dstRow = dstBuf + row * subW;
-                std::memcpy(dstRow, srcRow, subW * sizeof(uint16_t));
+                std::memcpy(dstRow, unpackedRow.data() + subX,
+                            subW * sizeof(uint16_t));
             }
         }
         else
         {
-            // Unpacked 16-bit raw (or 10/12-bit in 16-bit container)
-            const uint16_t *srcBuf =
-                reinterpret_cast<const uint16_t *>(srcData);
-
+            // Unpacked 16-bit raw, or Pi 5 PISP decompressed (data is in
+            // 16-bit per pixel format in the DMA buffer). Use stride for
+            // correct row-to-row offsets.
             for (int row = 0; row < subH; row++)
             {
-                const uint16_t *srcRow =
-                    srcBuf + (subY + row) * fullW + subX;
+                const uint8_t *srcRow = srcData + (subY + row) * stride;
+                const uint16_t *srcPixels =
+                    reinterpret_cast<const uint16_t *>(srcRow);
                 uint16_t *dstRow = dstBuf + row * subW;
-                std::memcpy(dstRow, srcRow, subW * sizeof(uint16_t));
+                std::memcpy(dstRow, srcPixels + subX,
+                            subW * sizeof(uint16_t));
             }
+        }
+
+        // Apply left-shift to fill 16-bit range (configurable, default ON)
+        bool doLeftShift = (RawLeftShiftSP.findOnSwitchIndex() == 0);
+        unsigned int bd = m_IsPiSP && m_NativeBitDepth > 0
+                        ? m_NativeBitDepth
+                        : m_SensorModes[m_CurrentModeIndex].bitDepth;
+        if (doLeftShift && bd < 16)
+        {
+            applyRawLeftShift(dstBuf, static_cast<size_t>(subW) * subH, bd);
+        }
+
+        // RAW Mono: convert Bayer to mono by summing 2×2 superpixels
+        if (isRawMono)
+        {
+            int monoW = subW / 2;
+            int monoH = subH / 2;
+            // Convert in-place into the front of the buffer
+            convertRawToMono(dstBuf, dstBuf, subW, subH);
+
+            // Update frame geometry for the mono output
+            size_t monoBytes = static_cast<size_t>(monoW) * monoH * 2;
+            PrimaryCCD.setFrameBufferSize(monoBytes);
+            PrimaryCCD.setFrame(subX / 2, subY / 2, monoW, monoH);
+
+            // Remove Bayer flag for mono output
+            SetCCDCapability(GetCCDCapability() & ~CCD_HAS_BAYER);
+            LOGF_DEBUG("RAW Mono: %dx%d → %dx%d mono", subW, subH, monoW, monoH);
         }
     }
     else
     {
-        // RGB capture — ISP-processed output
-        // Data from libcamera is BGR888 (R, G, B in memory with our format choice)
-        int bpp = 8;
-        PrimaryCCD.setBPP(bpp);
-        PrimaryCCD.setNAxis(2);
+        // RGB or Mono ISP capture — ISP-processed output
+        // libcamera may output BGR888 (3 bpp) or XBGR8888 (4 bpp)
+        int srcBpp = 3; // bytes per pixel in DMA buffer
+        std::string fmtStr = m_ActivePixelFormat.toString();
+        if (fmtStr.find("XB") != std::string::npos ||
+            fmtStr.find("XR") != std::string::npos ||
+            fmtStr.find("BX") != std::string::npos ||
+            fmtStr.find("RX") != std::string::npos ||
+            fmtStr.find("AB") != std::string::npos ||
+            fmtStr.find("AR") != std::string::npos)
+            srcBpp = 4;
 
-        // Store as interleaved RGB: buffer size = W * H * 3
-        size_t frameBytes = static_cast<size_t>(subW) * subH * 3;
-        PrimaryCCD.setFrameBufferSize(frameBytes);
-
-        uint8_t *dstBuf = PrimaryCCD.getFrameBuffer();
-
-        int fullW = static_cast<int>(m_ActiveSize.width);
-        int bytesPerPixel = 3;
-
-        for (int row = 0; row < subH; row++)
+        if (isMono)
         {
-            const uint8_t *srcRow =
-                srcData + ((subY + row) * fullW + subX) * bytesPerPixel;
-            uint8_t *dstRow = dstBuf + row * subW * bytesPerPixel;
-            std::memcpy(dstRow, srcRow, subW * bytesPerPixel);
+            // Mono capture: extract single luminance channel (green)
+            // Saturation was set to 0 in applyCameraControls, so
+            // R≈G≈B.  We just take the green channel for NAXIS=2.
+            int bpp = 8;
+            PrimaryCCD.setBPP(bpp);
+            PrimaryCCD.setNAxis(2);
+
+            size_t frameBytes = static_cast<size_t>(subW) * subH;
+            PrimaryCCD.setFrameBufferSize(frameBytes);
+
+            uint8_t *dstBuf = PrimaryCCD.getFrameBuffer();
+            unsigned int stride = m_Config->at(0).stride;
+
+            for (int row = 0; row < subH; row++)
+            {
+                const uint8_t *srcRow = srcData + (subY + row) * stride
+                                        + subX * srcBpp;
+                size_t dstOffset = static_cast<size_t>(row) * subW;
+
+                for (int col = 0; col < subW; col++)
+                {
+                    // Green channel (index 1 in both BGR888 and XBGR8888)
+                    dstBuf[dstOffset + col] = srcRow[col * srcBpp + 1];
+                }
+            }
+
+            // Remove Bayer flag for mono output
+            SetCCDCapability(GetCCDCapability() & ~CCD_HAS_BAYER);
         }
+        else
+        {
+            // Full RGB output
+            int bpp = 8;
+            PrimaryCCD.setBPP(bpp);
+            PrimaryCCD.setNAxis(3);
+
+            // FITS 3D cube: NAXIS1=W, NAXIS2=H, NAXIS3=3
+            // Data must be plane-sequential: all R, all G, all B.
+            size_t planeSize = static_cast<size_t>(subW) * subH;
+            size_t frameBytes = planeSize * 3;
+            PrimaryCCD.setFrameBufferSize(frameBytes);
+
+            uint8_t *dstBuf = PrimaryCCD.getFrameBuffer();
+            uint8_t *rPlane = dstBuf;
+            uint8_t *gPlane = dstBuf + planeSize;
+            uint8_t *bPlane = dstBuf + planeSize * 2;
+
+            // Use stride from the config for correct row offsets in the DMA buffer.
+            unsigned int stride = m_Config->at(0).stride;
+
+            LOGF_DEBUG("downloadImage RGB: %dx%d  srcBpp=%d  stride=%u  subX=%d subY=%d",
+                       m_ActiveSize.width, m_ActiveSize.height, srcBpp, stride, subX, subY);
+
+            for (int row = 0; row < subH; row++)
+            {
+                const uint8_t *srcRow = srcData + (subY + row) * stride
+                                        + subX * srcBpp;
+                size_t dstOffset = static_cast<size_t>(row) * subW;
+
+                if (srcBpp == 3)
+                {
+                    // BGR888 → plane-sequential RGB
+                    for (int col = 0; col < subW; col++)
+                    {
+                        bPlane[dstOffset + col] = srcRow[col * 3 + 0]; // B
+                        gPlane[dstOffset + col] = srcRow[col * 3 + 1]; // G
+                        rPlane[dstOffset + col] = srcRow[col * 3 + 2]; // R
+                    }
+                }
+                else
+                {
+                    // XBGR8888 (4 bpp) → plane-sequential RGB
+                    for (int col = 0; col < subW; col++)
+                    {
+                        bPlane[dstOffset + col] = srcRow[col * 4 + 0]; // B
+                        gPlane[dstOffset + col] = srcRow[col * 4 + 1]; // G
+                        rPlane[dstOffset + col] = srcRow[col * 4 + 2]; // R
+                    }
+                }
+            }
+        }
+    }
+
+    // Extract metadata (temperature, black levels, actual exposure, etc.)
+    readRequestMetadata(m_CompletedRequest);
+
+    // Record DATE-END wall-clock time
+    {
+        auto now = std::chrono::system_clock::now();
+        auto tt  = std::chrono::system_clock::to_time_t(now);
+        auto ms  = std::chrono::duration_cast<std::chrono::milliseconds>(
+                       now.time_since_epoch()) % 1000;
+        struct tm utc;
+        gmtime_r(&tt, &utc);
+        char buf[64];
+        snprintf(buf, sizeof(buf), "%04d-%02d-%02dT%02d:%02d:%02d.%03ld",
+                 utc.tm_year + 1900, utc.tm_mon + 1, utc.tm_mday,
+                 utc.tm_hour, utc.tm_min, utc.tm_sec,
+                 static_cast<long>(ms.count()));
+        m_ExposureDateEnd = buf;
+    }
+
+    // In fast mode, re-queue for next frame instead of stopping
+    if (m_FastMode && m_FastFramesRemaining != 0)
+    {
+        // Save the request pointer before clearing it
+        lc::Request *reqToRequeue = m_CompletedRequest;
+
+        m_CompletedRequest = nullptr;
+        m_FrameReady = false;
+
+        LOGF_INFO("Fast exposure: frame delivered (%d remaining)",
+                  m_FastFramesRemaining.load());
+
+        // Restore Bayer capability for next raw frame if we cleared it
+        if (isRawMono || isMono)
+            SetCCDCapability(GetCCDCapability() | CCD_HAS_BAYER);
+
+        ExposureComplete(&PrimaryCCD);
+
+        // Decrement counter (-1 means unlimited)
+        if (m_FastFramesRemaining > 0)
+            m_FastFramesRemaining--;
+
+        // Re-queue the request for the next frame
+        if (reqToRequeue && m_CameraRunning)
+        {
+            reqToRequeue->reuse(lc::Request::ReuseBuffers);
+
+            // Re-apply controls for the next frame
+            float effectiveDuration = m_ExposureRequest;
+            auto frameType = PrimaryCCD.getFrameType();
+            if (frameType == INDI::CCDChip::BIAS_FRAME)
+                effectiveDuration = m_ExposureMinS;
+
+            int64_t expUs = static_cast<int64_t>(effectiveDuration * 1e6);
+            if (expUs < 1) expUs = 1;
+
+            reqToRequeue->controls().set(lc::controls::ExposureTime,
+                                         static_cast<int32_t>(expUs));
+            reqToRequeue->controls().set(lc::controls::AnalogueGain,
+                                         static_cast<float>(GainNP[0].getValue()));
+            {
+                int64_t frameDurMin = expUs;
+                int64_t frameDurMax = expUs + 1000 > 100000 ? expUs + 1000 : 100000;
+                reqToRequeue->controls().set(lc::controls::FrameDurationLimits,
+                                             lc::Span<const int64_t, 2>({frameDurMin, frameDurMax}));
+            }
+            applyCameraControls(reqToRequeue->controls());
+            if (m_HasAE)
+                reqToRequeue->controls().set(lc::controls::AeEnable, false);
+
+            m_Camera->queueRequest(reqToRequeue);
+        }
+
+        // Set up for the next frame
+        handleFastExposureFrame();
+        return 0;
     }
 
     // Stop camera (single-shot capture)
     stopCamera();
+
+    // Restore Bayer capability if we cleared it for mono formats
+    if (isRawMono || isMono)
+        SetCCDCapability(GetCCDCapability() | CCD_HAS_BAYER);
 
     m_CompletedRequest = nullptr;
     m_FrameReady = false;
@@ -715,6 +1262,59 @@ int RPiCamera::downloadImage()
 
     ExposureComplete(&PrimaryCCD);
     return 0;
+}
+
+// ============================================================
+//  Frame Metadata Extraction
+// ============================================================
+
+void RPiCamera::readRequestMetadata(lc::Request *request)
+{
+    if (!request)
+        return;
+
+    const auto &metadata = request->metadata();
+
+    // Sensor temperature
+    auto temp = metadata.get(lc::controls::SensorTemperature);
+    if (temp)
+    {
+        m_SensorTemperature = static_cast<double>(*temp);
+        TemperatureNP[0].setValue(m_SensorTemperature);
+        TemperatureNP.setState(IPS_OK);
+        TemperatureNP.apply();
+        LOGF_DEBUG("Sensor temperature: %.1f °C", m_SensorTemperature);
+    }
+
+    // Actual exposure time (may differ from requested due to sensor quantisation)
+    auto actualExp = metadata.get(lc::controls::ExposureTime);
+    if (actualExp)
+    {
+        m_LastActualExposureUs = *actualExp;
+        LOGF_DEBUG("Actual exposure: %lld µs (requested: %.0f µs)",
+                   static_cast<long long>(m_LastActualExposureUs),
+                   m_ExposureRequest * 1e6);
+    }
+
+    // Digital gain applied by ISP
+    auto dgain = metadata.get(lc::controls::DigitalGain);
+    if (dgain)
+    {
+        m_LastDigitalGain = *dgain;
+        LOGF_DEBUG("Digital gain: %.3f", m_LastDigitalGain);
+    }
+
+    // Sensor black levels (R, Gr, Gb, B)
+    auto blackLevels = metadata.get(lc::controls::SensorBlackLevels);
+    if (blackLevels)
+    {
+        auto &bl = *blackLevels;
+        for (int i = 0; i < 4; i++)
+            m_LastBlackLevels[i] = bl[i];
+        LOGF_DEBUG("Black levels: %d %d %d %d",
+                   m_LastBlackLevels[0], m_LastBlackLevels[1],
+                   m_LastBlackLevels[2], m_LastBlackLevels[3]);
+    }
 }
 
 // ============================================================
@@ -738,8 +1338,8 @@ bool RPiCamera::UpdateCCDFrame(int x, int y, int w, int h)
 
     size_t frameBytes = static_cast<size_t>(w) * h *
         (PrimaryCCD.getBPP() / 8);
-    if (!m_ActiveIsRaw)
-        frameBytes = static_cast<size_t>(w) * h * 3; // RGB interleaved
+    if (PrimaryCCD.getNAxis() == 3)
+        frameBytes = static_cast<size_t>(w) * h * 3; // RGB planar
 
     PrimaryCCD.setFrameBufferSize(frameBytes);
 
@@ -768,7 +1368,7 @@ bool RPiCamera::UpdateCCDBin(int binx, int biny)
             // Update Bayer pattern
             std::string bayer = bayerPatternFromFormat(mode.format);
             if (!bayer.empty())
-                IUSaveText(&BayerT[2], bayer.c_str());
+                BayerTP[2].setText(bayer.c_str());
 
             // Update raw format switch to match
             RawFormatSP.reset();
@@ -788,6 +1388,24 @@ bool RPiCamera::UpdateCCDBin(int binx, int biny)
 bool RPiCamera::UpdateCCDFrameType(INDI::CCDChip::CCD_FRAME fType)
 {
     PrimaryCCD.setFrameType(fType);
+
+    switch (fType)
+    {
+    case INDI::CCDChip::LIGHT_FRAME:
+        LOG_INFO("Frame type: LIGHT");
+        break;
+    case INDI::CCDChip::DARK_FRAME:
+        LOG_INFO("Frame type: DARK (use same exposure/gain as LIGHT)");
+        break;
+    case INDI::CCDChip::BIAS_FRAME:
+        LOGF_INFO("Frame type: BIAS (exposure will be forced to %.0f µs)",
+                  m_ExposureMinS * 1e6);
+        break;
+    case INDI::CCDChip::FLAT_FRAME:
+        LOG_INFO("Frame type: FLAT");
+        break;
+    }
+
     return true;
 }
 
@@ -810,16 +1428,31 @@ bool RPiCamera::StartStreaming()
     m_Allocator.reset();
     m_Config.reset();
 
-    // Cap streaming resolution to 1280 on the longest side
-    int maxDim = 1280;
-    int sw = PrimaryCCD.getXRes();
-    int sh = PrimaryCCD.getYRes();
-    if (sw > maxDim || sh > maxDim)
+    // Determine streaming resolution from preset
+    int sw = 1280, sh = 720;
+    int preset = StreamResSP.findOnSwitchIndex();
+    switch (preset)
     {
-        double scale = static_cast<double>(maxDim) / std::max(sw, sh);
-        sw = static_cast<int>(sw * scale) & ~1; // even dimensions
-        sh = static_cast<int>(sh * scale) & ~1;
+    case STREAM_720P:
+        sw = 1280; sh = 720;
+        break;
+    case STREAM_1080P:
+        sw = 1920; sh = 1080;
+        break;
+    case STREAM_4K:
+        sw = 3840; sh = 2160;
+        break;
+    case STREAM_CUSTOM:
+    default:
+        sw = static_cast<int>(StreamCustomResNP[0].getValue());
+        sh = static_cast<int>(StreamCustomResNP[1].getValue());
+        break;
     }
+    // Ensure even dimensions
+    sw &= ~1;
+    sh &= ~1;
+    if (sw < 160) sw = 160;
+    if (sh < 120) sh = 120;
 
     if (!configureForStreaming(sw, sh))
     {
@@ -827,9 +1460,25 @@ bool RPiCamera::StartStreaming()
         return false;
     }
 
+    // Use the actual negotiated size (libcamera may have adjusted it)
+    auto &streamCfg = m_Config->at(0);
+    sw = streamCfg.size.width;
+    sh = streamCfg.size.height;
+
     // Tell StreamManager about the format
     Streamer->setPixelFormat(INDI_RGB, 8);
     Streamer->setSize(sw, sh);
+
+    // INDI 2.1.x StreamManager reads source frame dimensions from PrimaryCCD
+    // (getSubW/getSubH), NOT from Streamer->setSize().  We must temporarily
+    // shrink PrimaryCCD's subframe to the streaming resolution so the internal
+    // size check in newFrame() passes.  Full resolution is restored in
+    // StopStreaming().
+    PrimaryCCD.setFrame(0, 0, sw, sh);
+
+    LOGF_DEBUG("Streaming config: %dx%d  stride=%u  fmt=%s",
+               sw, sh, streamCfg.stride,
+               streamCfg.pixelFormat.toString().c_str());
 
     if (!startCamera())
     {
@@ -837,25 +1486,46 @@ bool RPiCamera::StartStreaming()
         return false;
     }
 
+    // Compute FrameDurationLimits from target FPS
+    double targetFps = StreamFpsNP[0].getValue();
+    if (targetFps < 1.0) targetFps = 1.0;
+    int64_t frameDurUs = static_cast<int64_t>(1e6 / targetFps);
+
     // Set default streaming controls
     for (auto &req : m_Requests)
     {
-        double streamExp = Streamer->getExposure();  // seconds
+        double streamExp = Streamer->getTargetExposure();  // seconds
         int32_t expUs = static_cast<int32_t>(streamExp * 1e6);
         if (expUs < 100) expUs = 100;  // minimum
 
         req->controls().set(lc::controls::ExposureTime, expUs);
         req->controls().set(lc::controls::AnalogueGain,
                             static_cast<float>(GainNP[0].getValue()));
+
+        // Set frame duration to achieve target FPS
+        req->controls().set(lc::controls::FrameDurationLimits,
+                            lc::Span<const int64_t, 2>({frameDurUs, frameDurUs}));
+
         applyCameraControls(req->controls());
     }
+
+    // Set streaming flag BEFORE queueing so requestComplete sees it
+    m_IsStreaming = true;
+    m_StreamFrameCount = 0;
+    m_StreamFpsStart = std::chrono::steady_clock::now();
+    m_StreamFpsFrames = 0;
+    m_StreamEstFps = 0;
+
+    // Reset FPS display
+    StreamEstFpsNP[0].setValue(0);
+    StreamEstFpsNP.setState(IPS_BUSY);
+    StreamEstFpsNP.apply();
 
     // Queue all requests for continuous capture pipelining
     for (auto &req : m_Requests)
         m_Camera->queueRequest(req.get());
 
-    m_IsStreaming = true;
-    LOGF_INFO("Streaming started at %dx%d.", sw, sh);
+    LOGF_INFO("Streaming started at %dx%d, target %.0f FPS.", sw, sh, targetFps);
     return true;
 }
 
@@ -865,6 +1535,15 @@ bool RPiCamera::StopStreaming()
 
     if (m_CameraRunning)
         stopCamera();
+
+    // Restore PrimaryCCD to the full sensor resolution (it was temporarily
+    // set to the streaming resolution in StartStreaming).
+    PrimaryCCD.setFrame(0, 0, PrimaryCCD.getXRes(), PrimaryCCD.getYRes());
+
+    // Reset FPS display
+    StreamEstFpsNP[0].setValue(0);
+    StreamEstFpsNP.setState(IPS_IDLE);
+    StreamEstFpsNP.apply();
 
     LOG_INFO("Streaming stopped.");
     return true;
@@ -879,38 +1558,79 @@ bool RPiCamera::configureForStill()
     if (!m_Camera)
         return false;
 
-    std::string capFmt = GetCaptureFormat();
+    std::string capFmt = "INDI_RAW";
+    for (size_t i = 0; i < m_CaptureFormats.size(); i++)
+    {
+        if (CaptureFormatSP[i].getState() == ISS_ON)
+        {
+            capFmt = m_CaptureFormats[i].name;
+            break;
+        }
+    }
 
-    if (capFmt == "INDI_RAW")
+    if (capFmt == "INDI_RAW" || capFmt == "INDI_RAW_MONO")
     {
         // Raw Bayer capture from the sensor
         auto &mode = m_SensorModes[m_CurrentModeIndex];
-        m_Config = m_Camera->generateConfiguration({lc::StreamRole::Raw});
-        if (!m_Config || m_Config->empty())
-            return false;
 
-        m_Config->at(0).pixelFormat = mode.format;
-        m_Config->at(0).size = mode.size;
-        m_ActivePixelFormat = mode.format;
-        m_ActiveSize = mode.size;
-        m_ActiveIsRaw = true;
+        if (m_IsPiSP)
+        {
+            // Pi 5 (PiSP): the Raw stream delivers PISP-compressed data
+            // that we cannot decode.  Route through the ISP instead by
+            // using StillCapture with an unpacked 16-bit Bayer format.
+            // The ISP decompresses the data and outputs clean Bayer pixels.
+            m_Config = m_Camera->generateConfiguration(
+                {lc::StreamRole::StillCapture});
+            if (!m_Config || m_Config->empty())
+                return false;
 
-        // Update CCD params if needed
-        PrimaryCCD.setBPP(16);
-        PrimaryCCD.setNAxis(2);
+            lc::PixelFormat bayer16 = matchingBayer16Format(mode.format);
+            m_Config->at(0).pixelFormat = bayer16;
+            m_Config->at(0).size = mode.size;
+            m_ActivePixelFormat = bayer16;
+            m_ActiveSize = mode.size;
+            m_ActiveIsRaw = true;
+
+            PrimaryCCD.setBPP(16);
+            PrimaryCCD.setNAxis(2);
+
+            LOGF_DEBUG("Pi 5 raw: requesting %s %dx%d via ISP",
+                       bayer16.toString().c_str(),
+                       mode.size.width, mode.size.height);
+        }
+        else
+        {
+            // Non-Pi 5: use the Raw stream directly
+            m_Config = m_Camera->generateConfiguration({lc::StreamRole::Raw});
+            if (!m_Config || m_Config->empty())
+                return false;
+
+            m_Config->at(0).pixelFormat = mode.format;
+            m_Config->at(0).size = mode.size;
+            m_ActivePixelFormat = mode.format;
+            m_ActiveSize = mode.size;
+            m_ActiveIsRaw = true;
+
+            PrimaryCCD.setBPP(16);
+            PrimaryCCD.setNAxis(2);
+        }
     }
     else
     {
-        // ISP-processed RGB output
+        // ISP-processed RGB or Mono output
         m_Config = m_Camera->generateConfiguration(
             {lc::StreamRole::StillCapture});
         if (!m_Config || m_Config->empty())
             return false;
 
-        int w = PrimaryCCD.getSubW();
-        int h = PrimaryCCD.getSubH();
-        if (w <= 0) w = PrimaryCCD.getXRes();
-        if (h <= 0) h = PrimaryCCD.getYRes();
+        // Use ProcFrame dimensions if set, otherwise use sensor resolution
+        int w = static_cast<int>(ProcFrameNP[0].getValue());
+        int h = static_cast<int>(ProcFrameNP[1].getValue());
+        if (w <= 0 || h <= 0)
+        {
+            w = PrimaryCCD.getXRes();
+            h = PrimaryCCD.getYRes();
+        }
 
         m_Config->at(0).pixelFormat = lc::formats::BGR888;
         m_Config->at(0).size = {static_cast<unsigned>(w),
@@ -920,8 +1640,16 @@ bool RPiCamera::configureForStill()
                         static_cast<unsigned>(h)};
         m_ActiveIsRaw = false;
 
-        PrimaryCCD.setBPP(8);
-        PrimaryCCD.setNAxis(2);
+        if (capFmt == "INDI_MONO")
+        {
+            PrimaryCCD.setBPP(8);
+            PrimaryCCD.setNAxis(2);
+        }
+        else
+        {
+            PrimaryCCD.setBPP(8);
+            PrimaryCCD.setNAxis(3);
+        }
     }
 
     auto status = m_Config->validate();
@@ -933,11 +1661,32 @@ bool RPiCamera::configureForStill()
     if (status == lc::CameraConfiguration::Adjusted)
         LOG_WARN("Camera configuration was adjusted by the driver.");
 
+    // Check for Pi 5 PISP compressed — we cannot handle this
+    {
+        std::string valFmt = m_Config->at(0).pixelFormat.toString();
+        if (valFmt.find("PISP") != std::string::npos ||
+            valFmt.find("_COMP") != std::string::npos)
+        {
+            LOGF_ERROR("Unsupported raw format after validation: %s. "
+                       "No unpacked Bayer format available.", valFmt.c_str());
+            return false;
+        }
+    }
+
     if (m_Camera->configure(m_Config.get()))
     {
         LOG_ERROR("Failed to apply camera configuration.");
         return false;
     }
+
+    // Re-read the actual negotiated format/size/stride after configure()
+    m_ActivePixelFormat = m_Config->at(0).pixelFormat;
+    m_ActiveSize = m_Config->at(0).size;
+
+    LOGF_INFO("Still config: %dx%d  fmt=%s  stride=%u",
+              m_ActiveSize.width, m_ActiveSize.height,
+              m_ActivePixelFormat.toString().c_str(),
+              m_Config->at(0).stride);
 
     // ---- Allocate frame buffers ----
     auto *stream = m_Config->at(0).stream();
@@ -1004,6 +1753,16 @@ bool RPiCamera::configureForStreaming(int width, int height)
         return false;
     }
 
+    // Re-read actual negotiated format/size/stride after configure()
+    m_ActivePixelFormat = m_Config->at(0).pixelFormat;
+    m_ActiveSize = m_Config->at(0).size;
+
+    LOGF_INFO("Streaming config: %dx%d  fmt=%s  stride=%u  srcBpp=%d",
+              m_ActiveSize.width, m_ActiveSize.height,
+              m_ActivePixelFormat.toString().c_str(),
+              m_Config->at(0).stride,
+              (m_ActivePixelFormat.toString().find("X") != std::string::npos) ? 4 : 3);
+
     auto *stream = m_Config->at(0).stream();
     m_Allocator = std::make_unique<lc::FrameBufferAllocator>(m_Camera);
     int ret = m_Allocator->allocate(stream);
@@ -1069,7 +1828,7 @@ void RPiCamera::requestComplete(lc::Request *request)
     if (request->status() == lc::Request::RequestCancelled)
         return;
 
-    if (m_IsStreaming)
+    if (m_IsStreaming && m_CameraRunning)
     {
         // ---- Streaming: feed frame to INDI StreamManager ----
         const auto &buffers = request->buffers();
@@ -1079,23 +1838,153 @@ void RPiCamera::requestComplete(lc::Request *request)
             auto it = m_MappedBuffers.find(fb);
             if (it != m_MappedBuffers.end() && !it->second.empty())
             {
-                const uint8_t *data =
+                const uint8_t *srcData =
                     static_cast<const uint8_t *>(it->second[0].memory);
-                size_t len = it->second[0].length;
-                Streamer->newFrame(data, len);
+                size_t srcLen = it->second[0].length;
+
+                // The DMA buffer may have stride padding per row.
+                // StreamManager expects exactly width*height*3 bytes (RGB).
+                unsigned int stride = m_Config->at(0).stride;
+                unsigned int width  = m_ActiveSize.width;
+                unsigned int height = m_ActiveSize.height;
+
+                // Detect 4-bpp formats (XBGR8888 etc.)
+                int srcBpp = 3;
+                std::string fmtStr = m_ActivePixelFormat.toString();
+                if (fmtStr.find("XB") != std::string::npos ||
+                    fmtStr.find("XR") != std::string::npos ||
+                    fmtStr.find("BX") != std::string::npos ||
+                    fmtStr.find("RX") != std::string::npos ||
+                    fmtStr.find("AB") != std::string::npos ||
+                    fmtStr.find("AR") != std::string::npos)
+                    srcBpp = 4;
+
+                unsigned int rowBytes = width * 3; // output is always RGB 3bpp
+                size_t frameBytes = static_cast<size_t>(rowBytes) * height;
+
+                // Log first frame diagnostics
+                if (m_StreamFrameCount < 3)
+                {
+                    LOGF_INFO("Stream frame %u: %ux%u stride=%u srcBpp=%d "
+                              "fmt=%s srcLen=%zu frameBytes=%zu",
+                              m_StreamFrameCount, width, height, stride,
+                              srcBpp, fmtStr.c_str(), srcLen, frameBytes);
+                    // Sample a few pixels for sanity
+                    if (srcLen >= 12)
+                        LOGF_INFO("  First 12 bytes: %02x %02x %02x %02x  "
+                                  "%02x %02x %02x %02x  %02x %02x %02x %02x",
+                                  srcData[0], srcData[1], srcData[2], srcData[3],
+                                  srcData[4], srcData[5], srcData[6], srcData[7],
+                                  srcData[8], srcData[9], srcData[10], srcData[11]);
+                }
+
+                // Ensure pre-allocated streaming buffer is large enough
+                if (m_StreamBuffer.size() < frameBytes)
+                    m_StreamBuffer.resize(frameBytes);
+
+                if (srcBpp == 4 || stride != rowBytes)
+                {
+                    // Per-row processing: stride padding and/or 4→3 bpp
+                    for (unsigned int y = 0; y < height; y++)
+                    {
+                        const uint8_t *srcRow = srcData + y * stride;
+                        uint8_t *dstRow = m_StreamBuffer.data() + y * rowBytes;
+
+                        if (srcBpp == 4)
+                        {
+                            // XBGR8888 → RGB888: drop alpha, swap B↔R
+                            for (unsigned int x = 0; x < width; x++)
+                            {
+                                dstRow[x * 3 + 0] = srcRow[x * 4 + 2]; // R
+                                dstRow[x * 3 + 1] = srcRow[x * 4 + 1]; // G
+                                dstRow[x * 3 + 2] = srcRow[x * 4 + 0]; // B
+                            }
+                        }
+                        else
+                        {
+                            // BGR888 with stride padding — swap B↔R per pixel
+                            for (unsigned int x = 0; x < width; x++)
+                            {
+                                dstRow[x * 3 + 0] = srcRow[x * 3 + 2]; // R
+                                dstRow[x * 3 + 1] = srcRow[x * 3 + 1]; // G
+                                dstRow[x * 3 + 2] = srcRow[x * 3 + 0]; // B
+                            }
+                        }
+                    }
+                }
+                else
+                {
+                    // No stride padding — but still need BGR→RGB swap
+                    for (unsigned int y = 0; y < height; y++)
+                    {
+                        const uint8_t *srcRow = srcData + y * rowBytes;
+                        uint8_t *dstRow = m_StreamBuffer.data() + y * rowBytes;
+                        for (unsigned int x = 0; x < width; x++)
+                        {
+                            dstRow[x * 3 + 0] = srcRow[x * 3 + 2]; // R
+                            dstRow[x * 3 + 1] = srcRow[x * 3 + 1]; // G
+                            dstRow[x * 3 + 2] = srcRow[x * 3 + 0]; // B
+                        }
+                    }
+                }
+                Streamer->newFrame(m_StreamBuffer.data(), frameBytes);
+
+                m_StreamFrameCount++;
+
+                // Read sensor temperature periodically during streaming
+                if (m_StreamFrameCount % 30 == 0)
+                {
+                    const auto &metadata = request->metadata();
+                    auto temp = metadata.get(lc::controls::SensorTemperature);
+                    if (temp)
+                    {
+                        m_SensorTemperature = static_cast<double>(*temp);
+                        TemperatureNP[0].setValue(m_SensorTemperature);
+                        TemperatureNP.setState(IPS_OK);
+                        TemperatureNP.apply();
+                    }
+                }
             }
         }
 
         // Re-queue for continuous capture
         request->reuse(lc::Request::ReuseBuffers);
 
-        // Update exposure if it changed
-        double streamExp = Streamer->getExposure();
+        // Apply all current controls (exposure, gain, AWB, ISP tuning…)
+        // so that property changes made during streaming take effect
+        // on the very next frame.
+        double streamExp = Streamer->getTargetExposure();
         int32_t expUs = static_cast<int32_t>(streamExp * 1e6);
         if (expUs < 100) expUs = 100;
         request->controls().set(lc::controls::ExposureTime, expUs);
+        request->controls().set(lc::controls::AnalogueGain,
+                                static_cast<float>(GainNP[0].getValue()));
+        applyCameraControls(request->controls());
+
+        // Enforce target FPS via FrameDurationLimits
+        double targetFps = StreamFpsNP[0].getValue();
+        if (targetFps < 1.0) targetFps = 1.0;
+        int64_t frameDurUs = static_cast<int64_t>(1e6 / targetFps);
+        request->controls().set(lc::controls::FrameDurationLimits,
+                                lc::Span<const int64_t, 2>({frameDurUs, frameDurUs}));
 
         m_Camera->queueRequest(request);
+
+        // Measure actual FPS (update every 30 frames)
+        m_StreamFpsFrames++;
+        if (m_StreamFpsFrames >= 30)
+        {
+            auto now = std::chrono::steady_clock::now();
+            double elapsed = std::chrono::duration<double>(now - m_StreamFpsStart).count();
+            if (elapsed > 0)
+                m_StreamEstFps = m_StreamFpsFrames / elapsed;
+            m_StreamFpsStart = now;
+            m_StreamFpsFrames = 0;
+
+            StreamEstFpsNP[0].setValue(m_StreamEstFps);
+            StreamEstFpsNP.setState(IPS_OK);
+            StreamEstFpsNP.apply();
+        }
     }
     else
     {
@@ -1103,6 +1992,15 @@ void RPiCamera::requestComplete(lc::Request *request)
         std::lock_guard<std::mutex> lock(m_CompletedMutex);
         m_CompletedRequest = request;
         m_FrameReady = true;
+
+        // In fast mode, re-queue the request immediately for the next frame
+        // (the request will be re-used after downloadImage processes it)
+        if (m_FastMode && m_CameraRunning)
+        {
+            // We need to re-queue a request after download processes the buffer.
+            // The actual re-queue happens in downloadImage → handleFastExposureFrame
+            // after the buffer is copied.
+        }
     }
 }
 
@@ -1215,6 +2113,68 @@ bool RPiCamera::ISNewNumber(const char *dev, const char *name,
         return true;
     }
 
+    // ---- Lens Position (manual focus) ----
+    if (m_HasLensPosition && LensPositionNP.isNameMatch(name))
+    {
+        LensPositionNP.update(values, names, n);
+        LensPositionNP.setState(IPS_OK);
+        LensPositionNP.apply();
+        LOGF_INFO("Focus position set to %.2f dioptres", LensPositionNP[0].getValue());
+        return true;
+    }
+
+    // ---- Exposure Value ----
+    if (m_HasExposureValue && ExposureValueNP.isNameMatch(name))
+    {
+        ExposureValueNP.update(values, names, n);
+        ExposureValueNP.setState(IPS_OK);
+        ExposureValueNP.apply();
+        LOGF_INFO("Exposure Value set to %.1f", ExposureValueNP[0].getValue());
+        return true;
+    }
+
+    // ---- Fast Count ----
+    if (FastCountNP.isNameMatch(name))
+    {
+        FastCountNP.update(values, names, n);
+        FastCountNP.setState(IPS_OK);
+        FastCountNP.apply();
+        LOGF_INFO("Fast count set to %.0f", FastCountNP[0].getValue());
+        return true;
+    }
+
+    // ---- ProcFrame (ISP output size) ----
+    if (ProcFrameNP.isNameMatch(name))
+    {
+        ProcFrameNP.update(values, names, n);
+        ProcFrameNP.setState(IPS_OK);
+        ProcFrameNP.apply();
+        LOGF_INFO("ISP output size set to %.0fx%.0f",
+                  ProcFrameNP[0].getValue(), ProcFrameNP[1].getValue());
+        return true;
+    }
+
+    // ---- Stream Custom Resolution ----
+    if (StreamCustomResNP.isNameMatch(name))
+    {
+        StreamCustomResNP.update(values, names, n);
+        StreamCustomResNP.setState(IPS_OK);
+        StreamCustomResNP.apply();
+        LOGF_INFO("Stream custom resolution set to %.0fx%.0f",
+                  StreamCustomResNP[0].getValue(), StreamCustomResNP[1].getValue());
+        return true;
+    }
+
+    // ---- Stream Target FPS ----
+    if (StreamFpsNP.isNameMatch(name))
+    {
+        StreamFpsNP.update(values, names, n);
+        StreamFpsNP.setState(IPS_OK);
+        StreamFpsNP.apply();
+        LOGF_INFO("Stream target FPS set to %.1f", StreamFpsNP[0].getValue());
+        return true;
+    }
+
     return INDI::CCD::ISNewNumber(dev, name, values, names, n);
 }
 
@@ -1286,7 +2246,7 @@ bool RPiCamera::ISNewSwitch(const char *dev, const char *name,
 
             std::string bayer = bayerPatternFromFormat(mode.format);
             if (!bayer.empty())
-                IUSaveText(&BayerT[2], bayer.c_str());
+                BayerTP[2].setText(bayer.c_str());
 
             RawFormatSP.setState(IPS_OK);
             RawFormatSP.apply();
@@ -1316,6 +2276,105 @@ bool RPiCamera::ISNewSwitch(const char *dev, const char *name,
         return true;
     }
 
+    // ---- Raw Left Shift ----
+    if (RawLeftShiftSP.isNameMatch(name))
+    {
+        RawLeftShiftSP.update(states, names, n);
+        RawLeftShiftSP.setState(IPS_OK);
+        RawLeftShiftSP.apply();
+        LOGF_INFO("Raw normalize (left-shift): %s",
+                  RawLeftShiftSP.findOnSwitchIndex() == 0 ? "ON" : "OFF");
+        return true;
+    }
+
+    // ---- Fast Exposure Toggle ----
+    if (FastExposureSP.isNameMatch(name))
+    {
+        FastExposureSP.update(states, names, n);
+        FastExposureSP.setState(IPS_OK);
+        FastExposureSP.apply();
+        LOGF_INFO("Fast exposure: %s",
+                  FastExposureSP.findOnSwitchIndex() == 0 ? "ON" : "OFF");
+        return true;
+    }
+
+    // ---- AE Constraint Mode ----
+    if (m_HasAeConstraintMode && AeConstraintModeSP.isNameMatch(name))
+    {
+        AeConstraintModeSP.update(states, names, n);
+        AeConstraintModeSP.setState(IPS_OK);
+        AeConstraintModeSP.apply();
+        return true;
+    }
+
+    // ---- AE Exposure Mode ----
+    if (m_HasAeExposureMode && AeExposureModeSP.isNameMatch(name))
+    {
+        AeExposureModeSP.update(states, names, n);
+        AeExposureModeSP.setState(IPS_OK);
+        AeExposureModeSP.apply();
+        return true;
+    }
+
+    // ---- AE Metering Mode ----
+    if (m_HasAeMeteringMode && AeMeteringModeSP.isNameMatch(name))
+    {
+        AeMeteringModeSP.update(states, names, n);
+        AeMeteringModeSP.setState(IPS_OK);
+        AeMeteringModeSP.apply();
+        return true;
+    }
+
+    // ---- AF Metering ----
+    if (m_HasAfMetering && AfMeteringSP.isNameMatch(name))
+    {
+        AfMeteringSP.update(states, names, n);
+        AfMeteringSP.setState(IPS_OK);
+        AfMeteringSP.apply();
+        return true;
+    }
+
+    // ---- AF Pause ----
+    if (m_HasAfPause && AfPauseSP.isNameMatch(name))
+    {
+        AfPauseSP.update(states, names, n);
+        AfPauseSP.setState(IPS_OK);
+        AfPauseSP.apply();
+        AfPauseSP.reset();
+        AfPauseSP.apply();
+        return true;
+    }
+
+    // ---- AF Range ----
+    if (m_HasAfRange && AfRangeSP.isNameMatch(name))
+    {
+        AfRangeSP.update(states, names, n);
+        AfRangeSP.setState(IPS_OK);
+        AfRangeSP.apply();
+        return true;
+    }
+
+    // ---- AF Speed ----
+    if (m_HasAfSpeed && AfSpeedSP.isNameMatch(name))
+    {
+        AfSpeedSP.update(states, names, n);
+        AfSpeedSP.setState(IPS_OK);
+        AfSpeedSP.apply();
+        return true;
+    }
+
+    // ---- Stream Resolution Preset ----
+    if (StreamResSP.isNameMatch(name))
+    {
+        StreamResSP.update(states, names, n);
+        StreamResSP.setState(IPS_OK);
+        StreamResSP.apply();
+        int idx = StreamResSP.findOnSwitchIndex();
+        const char *labels[] = {"720p", "1080p", "4K", "Custom"};
+        LOGF_INFO("Stream resolution set to %s", labels[idx]);
+        return true;
+    }
+
     return INDI::CCD::ISNewSwitch(dev, name, states, names, n);
 }
 
@@ -1330,6 +2389,30 @@ void RPiCamera::applyCameraControls(lc::ControlList &ctrlList)
     {
         bool aeOn = (AutoExposureSP.findOnSwitchIndex() == 0);
         ctrlList.set(lc::controls::AeEnable, aeOn);
+
+        // AE sub-modes
+        if (m_HasAeConstraintMode)
+        {
+            int idx = AeConstraintModeSP.findOnSwitchIndex();
+            ctrlList.set(lc::controls::AeConstraintMode, static_cast<int32_t>(idx));
+        }
+        if (m_HasAeExposureMode)
+        {
+            int idx = AeExposureModeSP.findOnSwitchIndex();
+            ctrlList.set(lc::controls::AeExposureMode, static_cast<int32_t>(idx));
+        }
+        if (m_HasAeMeteringMode)
+        {
+            int idx = AeMeteringModeSP.findOnSwitchIndex();
+            ctrlList.set(lc::controls::AeMeteringMode, static_cast<int32_t>(idx));
+        }
+    }
+
+    // Exposure Value (EV compensation)
+    if (m_HasExposureValue)
+    {
+        ctrlList.set(lc::controls::ExposureValue,
+                     static_cast<float>(ExposureValueNP[0].getValue()));
     }
 
     // Auto White Balance
@@ -1359,8 +2442,14 @@ void RPiCamera::applyCameraControls(lc::ControlList &ctrlList)
                  static_cast<float>(BrightnessNP[0].getValue()));
     ctrlList.set(lc::controls::Contrast,
                  static_cast<float>(ContrastNP[0].getValue()));
-    ctrlList.set(lc::controls::Saturation,
-                 static_cast<float>(SaturationNP[0].getValue()));
+
+    // For INDI_MONO capture: force saturation to 0 so R≈G≈B
+    if (m_ActiveCaptureFmt == "INDI_MONO")
+        ctrlList.set(lc::controls::Saturation, 0.0f);
+    else
+        ctrlList.set(lc::controls::Saturation,
+                     static_cast<float>(SaturationNP[0].getValue()));
+
     ctrlList.set(lc::controls::Sharpness,
                  static_cast<float>(SharpnessNP[0].getValue()));
 
@@ -1380,6 +2469,40 @@ void RPiCamera::applyCameraControls(lc::ControlList &ctrlList)
             ctrlList.set(lc::controls::AfTrigger, 0);
         else if (trigIdx == AF_TRIGGER_CANCEL)
             ctrlList.set(lc::controls::AfTrigger, 1);
+
+        // Extended AF controls
+        if (m_HasAfMetering)
+        {
+            int idx = AfMeteringSP.findOnSwitchIndex();
+            ctrlList.set(lc::controls::AfMetering, static_cast<int32_t>(idx));
+        }
+        if (m_HasAfPause)
+        {
+            int idx = AfPauseSP.findOnSwitchIndex();
+            if (idx >= 0)
+                ctrlList.set(lc::controls::AfPause, static_cast<int32_t>(idx));
+        }
+        if (m_HasAfRange)
+        {
+            int idx = AfRangeSP.findOnSwitchIndex();
+            ctrlList.set(lc::controls::AfRange, static_cast<int32_t>(idx));
+        }
+        if (m_HasAfSpeed)
+        {
+            int idx = AfSpeedSP.findOnSwitchIndex();
+            ctrlList.set(lc::controls::AfSpeed, static_cast<int32_t>(idx));
+        }
+    }
+
+    // Lens Position (manual focus)
+    if (m_HasLensPosition)
+    {
+        int afIdx = m_HasAF ? AfModeSP.findOnSwitchIndex() : AF_MANUAL;
+        if (afIdx == AF_MANUAL)
+        {
+            ctrlList.set(lc::controls::LensPosition,
+                         static_cast<float>(LensPositionNP[0].getValue()));
+        }
     }
 }
 
@@ -1397,23 +2520,75 @@ void RPiCamera::addFITSKeywords(INDI::CCDChip *targetChip,
     // ---- Camera-specific keywords ----
 
     // Analog gain
-    fitsKeywords.push_back({"GAIN", GainNP[0].getValue(), 3, "Analog Gain"});
+    fitsKeywords.push_back(INDI::FITSRecord("GAIN", GainNP[0].getValue(), 3, "Analog Gain"));
+
+    // Digital gain (ISP)
+    if (m_LastDigitalGain > 0)
+        fitsKeywords.push_back(INDI::FITSRecord("DGAIN", m_LastDigitalGain, 3, "ISP Digital Gain"));
 
     // Sensor model
     if (!m_SensorModel.empty())
-        fitsKeywords.push_back({"SENSOR", m_SensorModel, "Camera Sensor Model"});
+        fitsKeywords.push_back(INDI::FITSRecord("SENSOR", m_SensorModel.c_str(), "Camera Sensor Model"));
 
     // Sensor-specific friendly name
     if (!m_SensorAdj.friendlyName.empty())
-        fitsKeywords.push_back({"CAMNAME", m_SensorAdj.friendlyName,
-                                "Camera Module"});
+        fitsKeywords.push_back(INDI::FITSRecord("CAMNAME", m_SensorAdj.friendlyName.c_str(),
+                                "Camera Module"));
+
+    // Sensor temperature
+    if (m_SensorTemperature != 0)
+        fitsKeywords.push_back(INDI::FITSRecord("CCD-TEMP", m_SensorTemperature, 1,
+                                "Sensor Temperature (C)"));
+
+    // Precise UTC timestamp of exposure start
+    if (!m_ExposureDateObs.empty())
+        fitsKeywords.push_back(INDI::FITSRecord("DATE-BEG", m_ExposureDateObs.c_str(),
+                                "UTC Exposure Start"));
+
+    // UTC timestamp of exposure end (frame download)
+    if (!m_ExposureDateEnd.empty())
+        fitsKeywords.push_back(INDI::FITSRecord("DATE-END", m_ExposureDateEnd.c_str(),
+                                "UTC Exposure End"));
+
+    // Actual exposure time from sensor metadata (vs requested)
+    if (m_LastActualExposureUs > 0)
+        fitsKeywords.push_back(INDI::FITSRecord("EXPTIME", m_LastActualExposureUs / 1e6, 6,
+                                "Actual Exposure Time (s)"));
+
+    // Image scale (arcsec/pixel) — computed from focal length and pixel size
+    {
+        double focalLen = ScopeInfoNP[FOCAL_LENGTH].getValue();  // mm
+        double pixSizeUm = PrimaryCCD.getPixelSizeX();           // µm
+        if (focalLen > 0 && pixSizeUm > 0)
+        {
+            double scale = (pixSizeUm / focalLen) * 206.265;    // arcsec/pixel
+            fitsKeywords.push_back(INDI::FITSRecord("SCALE", scale, 4,
+                                    "Image Scale (arcsec/pixel)"));
+        }
+    }
+
+    // Sensor black levels per Bayer channel
+    if (m_LastBlackLevels[0] != 0 || m_LastBlackLevels[1] != 0 ||
+        m_LastBlackLevels[2] != 0 || m_LastBlackLevels[3] != 0)
+    {
+        fitsKeywords.push_back(INDI::FITSRecord("BLKLVL0", static_cast<int64_t>(m_LastBlackLevels[0]),
+                                "Black Level Ch0"));
+        fitsKeywords.push_back(INDI::FITSRecord("BLKLVL1", static_cast<int64_t>(m_LastBlackLevels[1]),
+                                "Black Level Ch1"));
+        fitsKeywords.push_back(INDI::FITSRecord("BLKLVL2", static_cast<int64_t>(m_LastBlackLevels[2]),
+                                "Black Level Ch2"));
+        fitsKeywords.push_back(INDI::FITSRecord("BLKLVL3", static_cast<int64_t>(m_LastBlackLevels[3]),
+                                "Black Level Ch3"));
+    }
 
     // Actual bit depth of the raw data (before promotion to 16-bit)
     if (m_ActiveIsRaw && m_CurrentModeIndex < m_NumSensorModes)
     {
-        unsigned bd = m_SensorModes[m_CurrentModeIndex].bitDepth;
-        fitsKeywords.push_back({"RAWBPP",
-                                static_cast<int>(bd), "Native Sensor Bit Depth"});
+        int64_t bd = m_IsPiSP && m_NativeBitDepth > 0
+                   ? m_NativeBitDepth
+                   : m_SensorModes[m_CurrentModeIndex].bitDepth;
+        fitsKeywords.push_back(INDI::FITSRecord("RAWBPP",
+                                bd, "Native Sensor Bit Depth"));
     }
 }
 
@@ -1426,9 +2601,26 @@ bool RPiCamera::saveConfigItems(FILE *fp)
     INDI::CCD::saveConfigItems(fp);
 
     GainNP.save(fp);
+    RawLeftShiftSP.save(fp);
+    FastExposureSP.save(fp);
+    FastCountNP.save(fp);
+    ProcFrameNP.save(fp);
+    StreamResSP.save(fp);
+    StreamCustomResNP.save(fp);
+    StreamFpsNP.save(fp);
 
     if (m_HasAE)
+    {
         AutoExposureSP.save(fp);
+        if (m_HasAeConstraintMode)
+            AeConstraintModeSP.save(fp);
+        if (m_HasAeExposureMode)
+            AeExposureModeSP.save(fp);
+        if (m_HasAeMeteringMode)
+            AeMeteringModeSP.save(fp);
+    }
+    if (m_HasExposureValue)
+        ExposureValueNP.save(fp);
     if (m_HasAWB)
     {
         AutoWhiteBalanceSP.save(fp);
@@ -1446,7 +2638,18 @@ bool RPiCamera::saveConfigItems(FILE *fp)
         RawFormatSP.save(fp);
 
     if (m_HasAF)
+    {
         AfModeSP.save(fp);
+        if (m_HasAfMetering)
+            AfMeteringSP.save(fp);
+        if (m_HasAfRange)
+            AfRangeSP.save(fp);
+        if (m_HasAfSpeed)
+            AfSpeedSP.save(fp);
+    }
+
+    if (m_HasLensPosition)
+        LensPositionNP.save(fp);
 
     return true;
 }
@@ -1506,6 +2709,32 @@ bool RPiCamera::isPackedCSI2(const lc::PixelFormat &fmt) const
 }
 
 // ============================================================
+//  Utility — Find matching unpacked 16-bit Bayer format
+//
+//  Used on Pi 5 (PiSP) to request ISP-decompressed raw Bayer
+//  output via StillCapture instead of the PISP-compressed Raw
+//  stream.  Maps the sensor's native Bayer pattern to the
+//  corresponding 16-bit unpacked libcamera pixel format.
+// ============================================================
+
+lc::PixelFormat RPiCamera::matchingBayer16Format(
+    const lc::PixelFormat &rawFmt) const
+{
+    std::string bayer = bayerPatternFromFormat(rawFmt);
+
+    if (bayer == "GBRG") return lc::formats::SGBRG16;
+    if (bayer == "BGGR") return lc::formats::SBGGR16;
+    if (bayer == "RGGB") return lc::formats::SRGGB16;
+    if (bayer == "GRBG") return lc::formats::SGRBG16;
+
+    // Fallback: if pattern detection failed, try the original format
+    // name to infer.  Default to SGBRG16.
+    LOGF_WARN("Could not determine Bayer pattern for %s — defaulting to SGBRG16",
+              rawFmt.toString().c_str());
+    return lc::formats::SGBRG16;
+}
+
+// ============================================================
 //  Utility — Unpack 10-bit MIPI CSI-2 packed → 16-bit
 //
 //  4 pixels in 5 bytes:
@@ -1550,4 +2779,111 @@ void RPiCamera::unpack12bitCSI2(const uint8_t *src, uint16_t *dst,
         src += 3;
         dst += 2;
     }
+}
+
+// ============================================================
+//  Utility — Left-shift raw pixel data to fill 16-bit range
+// ============================================================
+
+void RPiCamera::applyRawLeftShift(uint16_t *data, size_t numPixels,
+                                  unsigned int bitDepth)
+{
+    if (bitDepth >= 16 || bitDepth == 0)
+        return;
+
+    unsigned int shift = 16 - bitDepth;
+    LOGF_DEBUG("Left-shifting raw data by %u bits (%u-bit → 16-bit)",
+               shift, bitDepth);
+
+    for (size_t i = 0; i < numPixels; i++)
+        data[i] = static_cast<uint16_t>(data[i] << shift);
+}
+
+// ============================================================
+//  Utility — Convert Bayer raw to mono by summing 2×2 superpixels
+//
+//  Each 2×2 block of Bayer pixels is summed and clamped to 16 bits.
+//  Output is half the width and half the height.  Can work in-place
+//  (dst == src) because output is always smaller.
+// ============================================================
+
+void RPiCamera::convertRawToMono(const uint16_t *src, uint16_t *dst,
+                                 int width, int height)
+{
+    int monoW = width / 2;
+    int monoH = height / 2;
+
+    for (int y = 0; y < monoH; y++)
+    {
+        const uint16_t *row0 = src + (y * 2) * width;
+        const uint16_t *row1 = src + (y * 2 + 1) * width;
+        uint16_t *dstRow = dst + y * monoW;
+
+        for (int x = 0; x < monoW; x++)
+        {
+            uint32_t sum = static_cast<uint32_t>(row0[x * 2])
+                         + static_cast<uint32_t>(row0[x * 2 + 1])
+                         + static_cast<uint32_t>(row1[x * 2])
+                         + static_cast<uint32_t>(row1[x * 2 + 1]);
+            // Clamp to 16-bit
+            if (sum > 65535) sum = 65535;
+            dstRow[x] = static_cast<uint16_t>(sum);
+        }
+    }
+}
+
+// ============================================================
+//  Fast Exposure — re-queue request for the next frame
+// ============================================================
+
+void RPiCamera::handleFastExposureFrame()
+{
+    if (!m_CameraRunning || !m_Camera)
+        return;
+
+    // In fast mode, the camera is still running.  We need to
+    // start a new "exposure" cycle by setting m_InExposure and
+    // waiting for the next frame to arrive.
+
+    // Record new DATE-OBS
+    {
+        auto now = std::chrono::system_clock::now();
+        auto tt  = std::chrono::system_clock::to_time_t(now);
+        auto ms  = std::chrono::duration_cast<std::chrono::milliseconds>(
+                       now.time_since_epoch()) % 1000;
+        struct tm utc;
+        gmtime_r(&tt, &utc);
+        char buf[64];
+        snprintf(buf, sizeof(buf), "%04d-%02d-%02dT%02d:%02d:%02d.%03ld",
+                 utc.tm_year + 1900, utc.tm_mon + 1, utc.tm_mday,
+                 utc.tm_hour, utc.tm_min, utc.tm_sec,
+                 static_cast<long>(ms.count()));
+        m_ExposureDateObs = buf;
+    }
+
+    m_ExposureTimer.start();
+    m_InExposure = true;
+    m_FrameReady = false;
+
+    // The camera is still running and will deliver the next frame
+    // via requestComplete → m_FrameReady.  TimerHit will pick it up.
+}
+
+// ============================================================
+//  Utility — Garbage column count for current sensor mode
+// ============================================================
+
+int RPiCamera::garbageColumnsForCurrentMode() const
+{
+    if (m_SensorAdj.perModeGarbage.empty())
+        return m_SensorAdj.garbageColumns;
+
+    unsigned int modeWidth = m_ActiveSize.width;
+    for (const auto &entry : m_SensorAdj.perModeGarbage)
+    {
+        if (entry.modeWidth == modeWidth || entry.modeWidth == 0)
+            return entry.garbageColumns;
+    }
+
+    return m_SensorAdj.garbageColumns;
 }
