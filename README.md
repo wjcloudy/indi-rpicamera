@@ -181,6 +181,13 @@ make -j$(nproc)
 sudo make install
 ```
 
+Or use the included install script which checks dependencies, builds, and installs in one step:
+
+```bash
+./install.sh            # Build and install (requires sudo)
+./install.sh --build    # Build only, skip install
+```
+
 This installs:
 - `/usr/bin/indi_rpicamera` — the driver binary
 - `/usr/share/indi/indi_rpicamera.xml` — the INDI driver descriptor
