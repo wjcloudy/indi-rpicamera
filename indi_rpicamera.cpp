@@ -1043,14 +1043,62 @@ int RPiCamera::downloadImage()
             }
         }
 
-        // Apply left-shift to fill 16-bit range (configurable, default ON)
+        // Normalize raw data to fill (or restore) the 16-bit range.
+        //
+        // PiSP (Pi 5):  The ISP already left-shifts sensor data to fill
+        //   16 bits (e.g. 10-bit << 6).  An additional shift would cause
+        //   overflow corruption, so we skip it.  When the user disables
+        //   normalization, we right-shift to recover native-depth values.
+        //
+        // Non-PiSP:  The unpacked data is in its native bit depth (e.g.
+        //   0–1023 for 10-bit).  Left-shifting promotes it to 16-bit.
         bool doLeftShift = (RawLeftShiftSP.findOnSwitchIndex() == 0);
         unsigned int bd = m_IsPiSP && m_NativeBitDepth > 0
                         ? m_NativeBitDepth
                         : m_SensorModes[m_CurrentModeIndex].bitDepth;
-        if (doLeftShift && bd < 16)
+        size_t numPixels = static_cast<size_t>(subW) * subH;
+
+        if (m_IsPiSP)
         {
-            applyRawLeftShift(dstBuf, static_cast<size_t>(subW) * subH, bd);
+            if (doLeftShift)
+            {
+                // Data is already 16-bit from the ISP — nothing to do.
+                LOGF_DEBUG("PiSP: data already normalized to 16-bit by ISP "
+                           "(native %u-bit, <<  %u) — no additional shift",
+                           bd, 16 - bd);
+            }
+            else if (bd < 16)
+            {
+                // User wants native bit-depth values: undo the ISP shift.
+                unsigned int shift = 16 - bd;
+                LOGF_DEBUG("PiSP: right-shifting by %u bits to restore "
+                           "%u-bit native values", shift, bd);
+                for (size_t i = 0; i < numPixels; i++)
+                    dstBuf[i] >>= shift;
+            }
+        }
+        else
+        {
+            if (doLeftShift && bd < 16)
+                applyRawLeftShift(dstBuf, numPixels, bd);
+        }
+
+        // Log pixel statistics for diagnostics
+        {
+            uint16_t pMin = 65535, pMax = 0;
+            uint64_t pSum = 0;
+            for (size_t i = 0; i < numPixels; i++)
+            {
+                if (dstBuf[i] < pMin) pMin = dstBuf[i];
+                if (dstBuf[i] > pMax) pMax = dstBuf[i];
+                pSum += dstBuf[i];
+            }
+            LOGF_DEBUG("RAW pixels: min=%u  max=%u  mean=%.0f  "
+                       "(%u-bit, PiSP=%s, normalize=%s)",
+                       pMin, pMax,
+                       static_cast<double>(pSum) / numPixels,
+                       bd, m_IsPiSP ? "yes" : "no",
+                       doLeftShift ? "on" : "off");
         }
 
         // RAW Mono: convert Bayer to mono by summing 2×2 superpixels
@@ -1509,6 +1557,13 @@ bool RPiCamera::StartStreaming()
         applyCameraControls(req->controls());
     }
 
+    // Streaming sends fully-debayered RGB — remove the Bayer property
+    // so INDI clients (KStars/Ekos) don't try to debayer it again.
+    // Just clearing the capability bit isn't enough because clients
+    // cache the property at connect time.  We must actively delete it.
+    SetCCDCapability(GetCCDCapability() & ~CCD_HAS_BAYER);
+    deleteProperty(BayerTP);
+
     // Set streaming flag BEFORE queueing so requestComplete sees it
     m_IsStreaming = true;
     m_StreamFrameCount = 0;
@@ -1535,6 +1590,11 @@ bool RPiCamera::StopStreaming()
 
     if (m_CameraRunning)
         stopCamera();
+
+    // Restore Bayer capability + property so RAW still captures report
+    // the correct Bayer pattern.
+    SetCCDCapability(GetCCDCapability() | CCD_HAS_BAYER);
+    defineProperty(BayerTP);
 
     // Restore PrimaryCCD to the full sensor resolution (it was temporarily
     // set to the streaming resolution in StartStreaming).

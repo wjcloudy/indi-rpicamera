@@ -19,10 +19,13 @@ Replaces Python-based drivers (e.g. `indi_pylibcamera`) with a proper INDI 3rd-p
 
 ### Raw Left-Shift Normalisation
 
-Raw pixel data is left-shifted to fill the full 16-bit range (e.g. 10-bit data is shifted left by 6). This maximises dynamic range visibility in FITS viewers and stacking software. The `BZERO`/`BSCALE` FITS keywords are set accordingly.
+Raw pixel data is normalised to fill the full 16-bit range, maximising dynamic range visibility in FITS viewers and stacking software.
 
-- **Configurable** — can be toggled ON/OFF via the `RAW_LEFT_SHIFT` property
+- **Pi 5 (PiSP)** — The ISP already delivers raw Bayer data left-shifted to 16-bit (e.g. 10-bit sensor data × 64). With normalisation **ON** (default) the data is passed through as-is. With normalisation **OFF** the driver right-shifts back to native bit depth (e.g. 0–1023 for 10-bit).
+- **Pi 4 / non-PiSP** — The raw stream delivers native-depth data. With normalisation **ON** the driver left-shifts to fill 16-bit (e.g. 10-bit << 6). With normalisation **OFF** data is passed through at native depth.
+- **Configurable** — toggle via the `RAW_LEFT_SHIFT` property
 - **Default ON** — matches the behaviour expected by most astrophotography stacking software
+- The `RAWBPP` FITS keyword records the native sensor bit depth regardless of normalisation state
 
 ### Fast Exposure Mode
 
@@ -109,6 +112,7 @@ In addition to all standard INDI FITS keywords (RA, DEC, AIRMASS, OBJECT, FILTER
 | `DATE-END` | UTC timestamp at frame readout completion |
 | `SCALE` | Image scale (arcsec/pixel) when telescope focal length is known |
 | `EXPTIME` | Actual exposure time (from sensor metadata, not requested) |
+| `RAWBPP` | Native sensor bit depth (e.g. 10, 12) — raw only |
 | `CAMTEMP` | Sensor temperature in °C (from metadata) |
 
 ### Multi-Camera Support
@@ -224,6 +228,27 @@ The driver listens on the default INDI port **7624**. Any INDI-compatible client
 
 ---
 
+## Standalone Capture Test
+
+A standalone test program (`test_capture5.cpp`) is included to verify the raw capture pipeline independently of INDI. It uses libcamera auto-exposure to find good settings, then captures:
+
+- **Phase 1 — RAW Bayer**: PGM (16-bit greyscale), PPM (demosaiced colour), FITS (2D, NAXIS=2 with Bayer keywords)
+- **Phase 2 — RGB ISP**: PPM (24-bit colour), FITS (3D, plane-sequential)
+
+```bash
+# Build (no INDI dependency — just libcamera + cfitsio)
+g++ -std=c++17 -O2 -o test_capture5 test_capture5.cpp \
+    $(pkg-config --cflags --libs libcamera) -lcfitsio
+
+# Run
+./test_capture5
+# Output: /tmp/raw_proof.{pgm,ppm,fits}  /tmp/rgb_proof.{ppm,fits}
+```
+
+Useful for diagnosing capture issues in isolation or verifying FITS output format.
+
+---
+
 ## Architecture
 
 ```
@@ -235,7 +260,7 @@ indi_rpicamera.h / .cpp      RPiCamera : INDI::CCD
          │                    ├── StartExposure / AbortExposure
          │                    │    ├── configureForStill()  (Raw or ISP pipeline)
          │                    │    ├── requestComplete()    (async DMA callback)
-         │                    │    └── downloadImage()      (unpack → left-shift → FITS)
+         │                    │    └── downloadImage()      (unpack → PiSP-aware normalize → FITS)
          │                    ├── Fast Exposure loop (camera stays running)
          │                    ├── StartStreaming / StopStreaming
          │                    │    ├── configureForStreaming()  (BGR888 VideoRecording)
