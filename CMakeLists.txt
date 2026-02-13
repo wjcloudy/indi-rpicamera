@@ -9,7 +9,7 @@ include(GNUInstallDirs)
 list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake_modules")
 
 set(RPICAMERA_VERSION_MAJOR 1)
-set(RPICAMERA_VERSION_MINOR 0)
+set(RPICAMERA_VERSION_MINOR 1)
 
 # ---- Find dependencies ----
 find_package(INDI REQUIRED COMPONENTS driver)
