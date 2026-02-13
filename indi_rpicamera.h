@@ -222,6 +222,9 @@ class RPiCamera : public INDI::CCD
     // (shift left by 16−bitdepth).  Configurable, default ON.
     INDI::PropertySwitch RawLeftShiftSP{2};
 
+    // AWB/AEC warmup: discard N initial frames so auto algorithms converge
+    INDI::PropertyNumber WarmupFramesNP{1};
+
     // Fast Exposure mode: keep camera running between frames
     INDI::PropertySwitch FastExposureSP{2};   ///< ON / OFF toggle
     INDI::PropertyNumber FastCountNP{1};      ///< Number of frames (0 = unlimited until abort)

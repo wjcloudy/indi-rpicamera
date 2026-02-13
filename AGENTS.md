@@ -208,6 +208,30 @@ Bayer pattern indicator) because the stream is debayered RGB. When streaming sto
 it **re-defines** BayerTP so that still captures get proper Bayer keywords. Use
 `deleteProperty()` / `defineProperty()` for this — not just hiding it.
 
+### AWB Warmup Frames (Added in v1.1)
+
+**Problem**: RGB/ISP captures had a strong green hue on the first frame because
+libcamera's AWB algorithm hadn't converged. Each `StartExposure()` call stops and
+restarts the camera, resetting AWB state.
+
+**Solution**: Before the real capture, the driver queues N short-exposure (30ms)
+"warmup" frames with auto-exposure enabled, discarding each one. This gives the
+ISP's AWB and AEC algorithms time to converge.
+
+**Property**: `AWB_WARMUP` / `WARMUP_FRAMES` — configurable 0–20 frames (default 5).
+Lives in the "Image Settings" tab.
+
+**When warmup is skipped**:
+- `warmup == 0` — user disabled it
+- Fast Exposure mode — camera stays running between frames, AWB is already converged
+- RAW captures — AWB doesn't affect raw Bayer data
+
+**Implementation** (in `StartExposure()`, after `startCamera()`):
+- Reuses `m_Requests[0]` with `ReuseBuffers`
+- Sets 30ms exposure + `AeEnable=true` + `FrameDurationLimits`
+- Applies user's AWB/ISP settings via `applyCameraControls()`
+- Waits up to 5s per frame; on timeout, breaks and proceeds
+
 ---
 
 ## Sensor-Specific Quirks

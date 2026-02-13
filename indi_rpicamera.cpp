@@ -93,6 +93,11 @@ bool RPiCamera::initProperties()
     RawLeftShiftSP.fill(getDeviceName(), "RAW_LEFT_SHIFT", "Raw Normalize",
                         IMAGE_SETTINGS_TAB, IP_RW, ISR_1OFMANY, 60, IPS_IDLE);
 
+    // --- AWB/AEC Warmup Frames ---
+    WarmupFramesNP[0].fill("WARMUP_FRAMES", "Frames", "%.0f", 0, 20, 1, 5);
+    WarmupFramesNP.fill(getDeviceName(), "AWB_WARMUP", "AWB Warmup",
+                        IMAGE_SETTINGS_TAB, IP_RW, 60, IPS_IDLE);
+
     // --- Fast Exposure toggle ---
     FastExposureSP[0].fill("FAST_ON",  "On",  ISS_OFF);
     FastExposureSP[1].fill("FAST_OFF", "Off", ISS_ON);
@@ -163,6 +168,7 @@ bool RPiCamera::updateProperties()
     {
         defineProperty(GainNP);
         defineProperty(RawLeftShiftSP);
+        defineProperty(WarmupFramesNP);
         defineProperty(FastExposureSP);
         defineProperty(FastCountNP);
         defineProperty(ProcFrameNP);
@@ -225,6 +231,7 @@ bool RPiCamera::updateProperties()
     {
         deleteProperty(GainNP);
         deleteProperty(RawLeftShiftSP);
+        deleteProperty(WarmupFramesNP);
         deleteProperty(FastExposureSP);
         deleteProperty(FastCountNP);
         deleteProperty(ProcFrameNP);
@@ -809,6 +816,85 @@ bool RPiCamera::StartExposure(float duration)
     {
         LOG_ERROR("Failed to start camera.");
         return false;
+    }
+
+    // ---- AWB/AEC warmup: discard initial frames so auto-algorithms converge ----
+    // The camera was just started, so AWB/AEC start from scratch.  Queueing
+    // a few short-exposure warmup frames with AE enabled lets the algorithms
+    // converge before we capture the real frame.  This eliminates the green
+    // hue that occurs when AWB hasn't settled.
+    //
+    // Skipped when:  warmup==0, Fast Exposure (camera stays running), or RAW
+    //                (RAW data isn't affected by AWB).
+    int warmupCount = static_cast<int>(WarmupFramesNP[0].getValue());
+    if (warmupCount > 0 && !m_FastMode && !m_ActiveIsRaw)
+    {
+        LOGF_INFO("AWB warmup: running %d frames for convergence...", warmupCount);
+
+        for (int wi = 0; wi < warmupCount; wi++)
+        {
+            // Reset ready flag
+            {
+                std::lock_guard<std::mutex> lock(m_CompletedMutex);
+                m_CompletedRequest = nullptr;
+                m_FrameReady = false;
+            }
+
+            // Reuse the pre-allocated request
+            auto &req = m_Requests[0];
+            req->reuse(lc::Request::ReuseBuffers);
+
+            // Short exposure + AE enabled for fast convergence
+            int64_t warmupExpUs = 30000; // 30ms — fast but enough light for AWB
+            req->controls().set(lc::controls::ExposureTime,
+                                static_cast<int32_t>(warmupExpUs));
+            req->controls().set(lc::controls::AnalogueGain,
+                                static_cast<float>(GainNP[0].getValue()));
+            req->controls().set(lc::controls::FrameDurationLimits,
+                                lc::Span<const int64_t, 2>({warmupExpUs, warmupExpUs + 50000}));
+
+            // Enable AE/AWB for warmup
+            if (m_HasAE)
+                req->controls().set(lc::controls::AeEnable, true);
+
+            // Apply user AWB/ISP settings
+            applyCameraControls(req->controls());
+
+            if (m_Camera->queueRequest(req.get()) < 0)
+            {
+                LOG_WARN("Warmup: failed to queue request, proceeding");
+                break;
+            }
+
+            // Wait for the frame (up to 5 seconds)
+            auto deadline = std::chrono::steady_clock::now()
+                          + std::chrono::seconds(5);
+            while (!m_FrameReady &&
+                   std::chrono::steady_clock::now() < deadline)
+            {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+
+            if (!m_FrameReady)
+            {
+                LOG_WARN("Warmup frame timed out, proceeding with capture");
+                break;
+            }
+
+            LOGF_DEBUG("Warmup frame %d/%d done", wi + 1, warmupCount);
+        }
+
+        // Clear the warmup frame data
+        {
+            std::lock_guard<std::mutex> lock(m_CompletedMutex);
+            m_CompletedRequest = nullptr;
+            m_FrameReady = false;
+        }
+
+        LOGF_INFO("AWB warmup complete (%d frames)", warmupCount);
+
+        // Reuse the request for the real capture
+        m_Requests[0]->reuse(lc::Request::ReuseBuffers);
     }
 
     // ---- Set controls on the first queued request ----
@@ -2235,6 +2321,16 @@ bool RPiCamera::ISNewNumber(const char *dev, const char *name,
         return true;
     }
 
+    // ---- AWB Warmup Frames ----
+    if (WarmupFramesNP.isNameMatch(name))
+    {
+        WarmupFramesNP.update(values, names, n);
+        WarmupFramesNP.setState(IPS_OK);
+        WarmupFramesNP.apply();
+        LOGF_INFO("AWB warmup set to %.0f frames", WarmupFramesNP[0].getValue());
+        return true;
+    }
+
     return INDI::CCD::ISNewNumber(dev, name, values, names, n);
 }
 
@@ -2662,6 +2758,7 @@ bool RPiCamera::saveConfigItems(FILE *fp)
 
     GainNP.save(fp);
     RawLeftShiftSP.save(fp);
+    WarmupFramesNP.save(fp);
     FastExposureSP.save(fp);
     FastCountNP.save(fp);
     ProcFrameNP.save(fp);
